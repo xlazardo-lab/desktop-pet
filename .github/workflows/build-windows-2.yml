@@ -1,0 +1,56 @@
+name: Windows-Build-2
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Windows-Anpassung
+        shell: python
+        run: |
+          import re
+          p='src-tauri/Cargo.toml'; s=open(p,encoding='utf-8').read()
+          s=s.replace('core-graphics = "0.24"\n','')
+          s+='\n[target.\'cfg(target_os = "macos")\'.dependencies]\ncore-graphics = "0.24"\n'
+          open(p,'w',encoding='utf-8').write(s)
+          p='src-tauri/src/lib.rs'; s=open(p,encoding='utf-8').read()
+          s=s.replace('#[tauri::command]\nfn get_mouse_position()','#[cfg(target_os = "macos")]\n#[tauri::command]\nfn get_mouse_position()')
+          s+='''
+          #[cfg(not(target_os = "macos"))]
+          #[tauri::command]
+          fn get_mouse_position(window: tauri::WebviewWindow) -> Result<MousePosition, String> {
+              let cursor = window.cursor_position().map_err(|e| e.to_string())?;
+              let origin = window.outer_position().map_err(|e| e.to_string())?;
+              let scale = window.scale_factor().map_err(|e| e.to_string())?;
+              Ok(MousePosition { x: (cursor.x - origin.x as f64) / scale, y: (cursor.y - origin.y as f64) / scale })
+          }
+          '''
+          open(p,'w',encoding='utf-8').write(s)
+          print('patched')
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Abhaengigkeiten installieren
+        run: npm ci
+
+      - name: Icons neu erzeugen
+        run: npx tauri icon src-tauri/icons/icon.png
+
+      - name: App bauen
+        env:
+          VITE_SUPABASE_URL: https://vxosuqjdkjmpvyouzfsk.supabase.co
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+        run: npx tauri build --bundles nsis
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Desktop-Pet-Windows-Installer
+          path: src-tauri/target/release/bundle/nsis/*.exe

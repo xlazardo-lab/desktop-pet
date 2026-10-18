@@ -1,0 +1,1212 @@
+diff --git a/src/App.tsx b/src/App.tsx
+index c1672d6..8742ecb 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
+ import { register, unregister } from "@tauri-apps/plugin-global-shortcut";
+ import Pet from "./components/Pet";
+ import SpeechBubble from "./components/SpeechBubble";
+-import RadialMenu, { MenuAction } from "./components/RadialMenu";
++import type { MenuAction } from "./components/RadialMenu";
+ import CommandPalette from "./components/CommandPalette";
+ import SettingsPanel from "./components/SettingsPanel";
+ import JournalPanel from "./components/JournalPanel";
+@@ -15,13 +15,16 @@ import ImageCard, { ReceivedImage, imageCardCenter, IMAGE_CARD_W, IMAGE_CARD_H }
+ import { imageFileToDataUrl, pickImageFile } from "./lib/actions";
+ import type { IncomingInteraction } from "./hooks/useFriends";
+ import YarnBall, { YarnHandle, YarnState } from "./components/YarnBall";
+-import CoupleCorner, { PlantState, Countdown, CORNER_W, CORNER_H, todayStr } from "./components/CoupleCorner";
++import { PlantState, todayStr } from "./components/CoupleCorner";
++import CountdownPanel, { CountdownT, formatRemaining } from "./components/CountdownPanel";
++import PlantWidget, { PlantPos, POT_H, potWidth } from "./components/PlantWidget";
+ import { useActiveTime } from "./hooks/useActiveTime";
+ import { packColor } from "./lib/look";
+ import ChatPanel, { ChatEntry } from "./components/ChatPanel";
+ import StickyNoteComponent from "./components/StickyNote";
+ import NotesPanel from "./components/NotesPanel";
+ import MoreMenu from "./components/MoreMenu";
++import CatMenu from "./components/CatMenu";
+ import SnackPanel, { Snack, SNACKS } from "./components/SnackPanel";
+ import FeedAnimation from "./components/FeedAnimation";
+ import TimerPanel from "./components/TimerPanel";
+@@ -148,6 +151,9 @@ export default function App() {
+   const partner = mutualFriends[0] ?? null;
+   const partnerName = partner?.name ?? "Schatz";
+   const spawnYarnRef = useRef<(s: YarnState) => void>();
++  const menuExtraRef = useRef<{ kiss?: () => void; image?: () => void }>({});
++  const setMessagesOpenRef = useRef<(v: boolean) => void>();
++  setMessagesOpenRef.current = setMessagesOpen;
+ 
+   const [shortcut, setShortcut] = useState(() =>
+     localStorage.getItem("chat-shortcut") || DEFAULT_SHORTCUT
+@@ -178,13 +184,28 @@ export default function App() {
+   const [yarnDragging, setYarnDragging] = useState(false);
+   const [petMoveMs, setPetMoveMs] = useState(0);
+   const [visitorEffect, setVisitorEffect] = useState<{ id: number; emojis: string[]; text?: string } | null>(null);
+-  const [cornerEditing, setCornerEditing] = useState(false);
++  const [plantDragging, setPlantDragging] = useState(false);
++  const [plantPos, setPlantPosState] = useState<PlantPos>(() => {
++    try {
++      const p = JSON.parse(localStorage.getItem("plant-pos") || "null");
++      if (p) return { x: Math.min(p.x, window.innerWidth - 40), y: Math.min(p.y, window.innerHeight - 4) };
++    } catch { /* ignore */ }
++    return { x: 70, y: window.innerHeight - 30 };
++  });
++  const setPlantPos = useCallback((p: PlantPos) => {
++    setPlantPosState(p);
++    try { localStorage.setItem("plant-pos", JSON.stringify(p)); } catch { /* ignore */ }
++  }, []);
+   const [plant, setPlant] = useState<PlantState>(() => {
+     try { return JSON.parse(localStorage.getItem("couple-plant") || "") as PlantState; } catch { return { points: 0 }; }
+   });
+-  const [countdown, setCountdownState] = useState<Countdown | null>(() => {
+-    try { return JSON.parse(localStorage.getItem("couple-countdown") || "null"); } catch { return null; }
++  const [countdown, setCountdownState] = useState<CountdownT | null>(() => {
++    try {
++      const c = JSON.parse(localStorage.getItem("couple-countdown") || "null");
++      return c && typeof c.at === "number" ? c : null;
++    } catch { return null; }
+   });
++  const [countdownOpen, setCountdownOpen] = useState(false);
+   useEffect(() => { try { localStorage.setItem("couple-plant", JSON.stringify(plant)); } catch { /* ignore */ } }, [plant]);
+   useEffect(() => { try { localStorage.setItem("couple-countdown", JSON.stringify(countdown)); } catch { /* ignore */ } }, [countdown]);
+   const [receivedImages, setReceivedImages] = useState<ReceivedImage[]>([]);
+@@ -210,7 +231,7 @@ export default function App() {
+     }
+   }, [nearPet, draggingSnack]);
+ 
+-  const overlayOpen = menuOpen || paletteOpen || dragging || settingsOpen || journalOpen || achievementsOpen || friendsOpen || notesOpen || moreOpen || timerOpen || feedOpen || !!draggingSnack || visitorOverlay || yarnDragging || cornerEditing || messagesOpen;
++  const overlayOpen = menuOpen || paletteOpen || dragging || settingsOpen || journalOpen || achievementsOpen || friendsOpen || notesOpen || moreOpen || timerOpen || feedOpen || !!draggingSnack || visitorOverlay || yarnDragging || messagesOpen || plantDragging || countdownOpen;
+ 
+   const extraHitZones = [
+     ...(visitorPos ? [visitorPos] : []),
+@@ -223,7 +244,7 @@ export default function App() {
+     { x: position.x - 26, y: position.y + 33, w: 52, h: 6 },
+     ...(unreadCount > 0 ? [{ x: position.x + 34, y: position.y - 40, w: 50, h: 34 }] : []),
+     ...(yarnPos && yarnPos.x > -100 ? [{ x: yarnPos.x, y: yarnPos.y, w: 44, h: 44 }] : []),
+-    ...(partner ? [{ x: 16 + CORNER_W / 2, y: window.innerHeight - 16 - CORNER_H / 2, w: CORNER_W + 10, h: CORNER_H + 10 }] : []),
++    ...(partner ? [{ x: plantPos.x, y: plantPos.y - POT_H / 2 + 8, w: potWidth(plant.points) + 30, h: POT_H + 34 }] : []),
+     ...(receivedImages.length > 0 ? [{ ...imageCardCenter(position.x, position.y), w: IMAGE_CARD_W + 10, h: IMAGE_CARD_H + 10 }] : []),
+   ];
+ 
+@@ -279,8 +300,8 @@ export default function App() {
+         setMoreOpen(false);
+         setTimerOpen(false);
+         setFeedOpen(false);
+-        setPaletteOpen(true);
+-        trackEvent("menuOpen", "palette");
++        setMessagesOpenRef.current?.(true);
++        trackEvent("menuOpen", "messages");
+       }
+     });
+     return () => { unregister(shortcut); };
+@@ -419,6 +440,15 @@ export default function App() {
+           trackEvent("timer");
+           setTimerOpen(true);
+           break;
++        case "kiss":
++          menuExtraRef.current.kiss?.();
++          break;
++        case "sendimage":
++          menuExtraRef.current.image?.();
++          break;
++        case "countdown":
++          setCountdownOpen(true);
++          break;
+         case "messages":
+           setMessagesOpen(true);
+           break;
+@@ -593,8 +623,8 @@ export default function App() {
+       setPlant((prev) => ({ ...prev, points: Math.max(prev.points + 1, a.points), waterThem: today, lastWater: Date.now() }));
+       say(`${i.fromName} hat unsere Blume gegossen 🌷💧`, 5000);
+     } else if (a.t === "countdown") {
+-      setCountdownState(a.date ? { date: a.date, label: a.label } : null);
+-      if (a.date) say(`${i.fromName} hat einen Countdown gesetzt: ${a.label} 📅`, 5000);
++      setCountdownState(typeof a.at === "number" ? { at: a.at, label: a.label } : null);
++      if (typeof a.at === "number") say(`${i.fromName} hat einen Countdown gesetzt: ${a.label} – noch ${formatRemaining(a.at - Date.now())} ⏳`, 7000);
+     }
+   };
+ 
+@@ -715,6 +745,22 @@ export default function App() {
+     playCouple(kind);
+   }, [currentVisit, sendAction, playCouple]);
+ 
++  menuExtraRef.current = {
++    kiss: () => {
++      if (!partner) return;
++      if (currentVisit && currentVisit.fromPetId === partner.id) {
++        sendCouple("kiss");
++        return;
++      }
++      sendAction(partner.id, { t: "kiss" });
++      showPetEffect(["😘", "💋", "💕", "💖"]);
++      say(`Küsschen an ${partner.name} geschickt 😘`, 4000);
++    },
++    image: () => {
++      if (partner) sendImageTo(partner.id);
++    },
++  };
++
+   // ---- Shared plant & countdown ----
+   const waterPlant = useCallback(() => {
+     const today = todayStr();
+@@ -725,11 +771,38 @@ export default function App() {
+     say(next.points % 7 === 0 ? "Unsere Blume wächst! 🌷" : "*plitsch platsch* 💧", 3500);
+   }, [plant, partner, sendAction, say]);
+ 
+-  const setCountdown = useCallback((c: Countdown | null) => {
++  const setCountdown = useCallback((c: CountdownT | null) => {
+     setCountdownState(c);
+-    if (partner) sendAction(partner.id, { t: "countdown", date: c?.date ?? null, label: c?.label ?? "" });
++    if (partner) sendAction(partner.id, { t: "countdown", at: c?.at ?? null, label: c?.label ?? "" });
+   }, [partner, sendAction]);
+ 
++  // The cat reminds you of the countdown at a few milestones
++  const announcedRef = useRef<Set<string>>(new Set());
++  useEffect(() => {
++    if (!countdown) return;
++    const marks: [number, string][] = [
++      [7 * 86_400_000, "Noch eine Woche bis"],
++      [86_400_000, "Morgen ist es so weit:"],
++      [3_600_000, "Nur noch eine Stunde bis"],
++      [600_000, "Noch 10 Minuten bis"],
++      [0, "Jetzt! 🎉"],
++    ];
++    const check = () => {
++      const left = countdown.at - Date.now();
++      for (const [ms, text] of marks) {
++        const key = `${countdown.at}-${ms}`;
++        if (left <= ms && left > ms - 120_000 && !announcedRef.current.has(key)) {
++          announcedRef.current.add(key);
++          say(`${text} ${countdown.label} ⏳💕`, 10000);
++          break;
++        }
++      }
++    };
++    check();
++    const id = setInterval(check, 30_000);
++    return () => clearInterval(id);
++  }, [countdown, say]);
++
+   const handleThemeImport = useCallback(
+     (name: string, idle: string, walk: string, sleep: string) => {
+       addCustomTheme(name, idle, walk, sleep);
+@@ -773,12 +846,13 @@ export default function App() {
+       )}
+ 
+       {menuOpen && (
+-        <RadialMenu
++        <CatMenu
+           x={position.x}
+           y={position.y}
+           musicPlaying={musicPlaying}
+-          onSelect={handleMenuSelect}
+-          onMore={() => { setMenuOpen(false); setMoreOpen(true); }}
++          unread={unreadCount}
++          partnerName={partner?.name ?? null}
++          onSelect={(a) => { setMenuOpen(false); handleMenuSelect(a); }}
+           onClose={() => setMenuOpen(false)}
+         />
+       )}
+@@ -1008,13 +1082,22 @@ export default function App() {
+       )}
+ 
+       {partner && (
+-        <CoupleCorner
+-          partnerName={partnerName}
++        <PlantWidget
+           plant={plant}
+-          countdown={countdown}
++          partnerName={partnerName}
++          pos={plantPos}
++          onMove={setPlantPos}
+           onWater={waterPlant}
+-          onSetCountdown={setCountdown}
+-          onEditingChange={setCornerEditing}
++          onDragChange={setPlantDragging}
++        />
++      )}
++
++      {countdownOpen && (
++        <CountdownPanel
++          countdown={countdown}
++          partnerName={partnerName}
++          onSave={setCountdown}
++          onClose={() => setCountdownOpen(false)}
+         />
+       )}
+ 
+diff --git a/src/components/CatMenu.tsx b/src/components/CatMenu.tsx
+new file mode 100644
+index 0000000..85c5fb7
+--- /dev/null
++++ b/src/components/CatMenu.tsx
+@@ -0,0 +1,100 @@
++import type { MenuAction } from "./RadialMenu";
++import "../styles/menu.css";
++
++interface Tile {
++  action: MenuAction;
++  icon: string;
++  label: string;
++  needsPartner?: boolean;
++}
++
++const GROUPS: { title: string; tiles: Tile[] }[] = [
++  {
++    title: "💕 Zusammen",
++    tiles: [
++      { action: "messages", icon: "💌", label: "Nachrichten" },
++      { action: "kiss", icon: "😘", label: "Küsschen", needsPartner: true },
++      { action: "sendimage", icon: "🖼️", label: "Bild senden", needsPartner: true },
++      { action: "countdown", icon: "⏳", label: "Countdown" },
++      { action: "friends", icon: "🐾", label: "Freunde" },
++    ],
++  },
++  {
++    title: "🐱 Katze",
++    tiles: [
++      { action: "feed", icon: "🍣", label: "Füttern" },
++      { action: "yarn", icon: "🧶", label: "Wollknäuel" },
++      { action: "nap", icon: "😴", label: "Schlafen" },
++      { action: "home", icon: "🏠", label: "Ab ins Haus" },
++      { action: "settings", icon: "🎀", label: "Aussehen" },
++    ],
++  },
++  {
++    title: "✨ Extras",
++    tiles: [
++      { action: "music", icon: "🎵", label: "Musik" },
++      { action: "timer", icon: "⏱️", label: "Timer" },
++      { action: "notes", icon: "📝", label: "Notizen" },
++      { action: "journal", icon: "📖", label: "Tagebuch" },
++      { action: "achievements", icon: "🏆", label: "Erfolge" },
++    ],
++  },
++];
++
++export const CAT_MENU_W = 300;
++export const CAT_MENU_H = 290;
++
++interface CatMenuProps {
++  x: number;
++  y: number;
++  musicPlaying?: boolean;
++  unread: number;
++  partnerName?: string | null;
++  onSelect: (action: MenuAction) => void;
++  onClose: () => void;
++}
++
++export default function CatMenu({ x, y, musicPlaying, unread, partnerName, onSelect, onClose }: CatMenuProps) {
++  // Prefer showing the menu above the cat; flip below / clamp to the screen
++  const w = window.innerWidth;
++  const h = window.innerHeight;
++  const left = Math.max(8, Math.min(w - CAT_MENU_W - 8, x - CAT_MENU_W / 2));
++  let top = y - 48 - CAT_MENU_H;
++  if (top < 8) top = Math.min(h - CAT_MENU_H - 8, y + 48);
++
++  return (
++    <>
++      <div className="cat-menu-backdrop" onClick={onClose} />
++      <div className="cat-menu" style={{ left, top, width: CAT_MENU_W }}>
++        {GROUPS.map((g) => (
++          <div key={g.title} className="cat-menu-group">
++            <div className="cat-menu-title">{g.title}</div>
++            <div className="cat-menu-grid">
++              {g.tiles.map((t, i) => {
++                const disabled = t.needsPartner && !partnerName;
++                const icon = t.action === "music" && musicPlaying ? "🔇" : t.icon;
++                const label = t.action === "music" && musicPlaying ? "Stumm" : t.label;
++                return (
++                  <button
++                    key={t.action}
++                    className={`cat-menu-tile ${disabled ? "disabled" : ""}`}
++                    style={{ animationDelay: `${i * 25}ms` }}
++                    title={disabled ? "Füge zuerst deinen Schatz als Freund hinzu" : label}
++                    onClick={(e) => {
++                      e.stopPropagation();
++                      if (!disabled) onSelect(t.action);
++                    }}
++                  >
++                    <span className="cat-menu-icon">{icon}</span>
++                    <span className="cat-menu-label">{label}</span>
++                    {t.action === "messages" && unread > 0 && <span className="cat-menu-badge">{unread}</span>}
++                  </button>
++                );
++              })}
++            </div>
++          </div>
++        ))}
++      </div>
++    </>
++  );
++}
+diff --git a/src/components/CountdownPanel.tsx b/src/components/CountdownPanel.tsx
+new file mode 100644
+index 0000000..04f611e
+--- /dev/null
++++ b/src/components/CountdownPanel.tsx
+@@ -0,0 +1,97 @@
++import { useEffect, useState } from "react";
++
++export interface CountdownT {
++  at: number; // timestamp (ms)
++  label: string;
++}
++
++export function formatRemaining(ms: number): string {
++  if (ms <= 0) return "jetzt! 🎉";
++  const s = Math.floor(ms / 1000);
++  const d = Math.floor(s / 86400);
++  const h = Math.floor((s % 86400) / 3600);
++  const m = Math.floor((s % 3600) / 60);
++  const sec = s % 60;
++  if (d > 0) return `${d} T ${h} Std ${m} Min`;
++  if (h > 0) return `${h} Std ${m} Min`;
++  if (m > 0) return `${m} Min ${sec} Sek`;
++  return `${sec} Sek`;
++}
++
++function toLocalInput(ts: number) {
++  const d = new Date(ts);
++  const p = (n: number) => String(n).padStart(2, "0");
++  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
++}
++
++interface CountdownPanelProps {
++  countdown: CountdownT | null;
++  partnerName: string;
++  onSave: (c: CountdownT | null) => void;
++  onClose: () => void;
++}
++
++export default function CountdownPanel({ countdown, partnerName, onSave, onClose }: CountdownPanelProps) {
++  const [editing, setEditing] = useState(!countdown);
++  const [when, setWhen] = useState(countdown ? toLocalInput(countdown.at) : "");
++  const [label, setLabel] = useState(countdown?.label ?? "");
++  const [now, setNow] = useState(Date.now());
++
++  useEffect(() => {
++    const id = setInterval(() => setNow(Date.now()), 1000);
++    return () => clearInterval(id);
++  }, []);
++
++  const save = () => {
++    const at = new Date(when).getTime();
++    if (!when || Number.isNaN(at)) return;
++    onSave({ at, label: label.trim() || `Wiedersehen mit ${partnerName} 💕` });
++    setEditing(false);
++  };
++
++  return (
++    <div className="chat-overlay" onClick={onClose}>
++      <div className="countdown-panel" onClick={(e) => e.stopPropagation()}>
++        <div className="chat-header">
++          <span>⏳ Countdown</span>
++          <button className="chat-close" onClick={onClose}>×</button>
++        </div>
++
++        {countdown && !editing && (
++          <div className="countdown-view">
++            <div className="countdown-label">{countdown.label}</div>
++            <div className="countdown-big">{formatRemaining(countdown.at - now)}</div>
++            <div className="countdown-when">
++              {new Date(countdown.at).toLocaleString("de-DE", { weekday: "long", day: "2-digit", month: "long", hour: "2-digit", minute: "2-digit" })} Uhr
++            </div>
++            <div className="countdown-actions">
++              <button onClick={() => { setWhen(toLocalInput(countdown.at)); setLabel(countdown.label); setEditing(true); }}>Ändern</button>
++              <button className="secondary" onClick={() => { onSave(null); setEditing(true); setWhen(""); setLabel(""); }}>Löschen</button>
++            </div>
++          </div>
++        )}
++
++        {editing && (
++          <div className="countdown-edit">
++            <label>Wann?</label>
++            <input type="datetime-local" value={when} onChange={(e) => setWhen(e.target.value)} />
++            <label>Was?</label>
++            <input
++              type="text"
++              value={label}
++              maxLength={50}
++              placeholder={`z. B. Wiedersehen mit ${partnerName} 💕`}
++              onChange={(e) => setLabel(e.target.value)}
++              onKeyDown={(e) => { if (e.key === "Enter") save(); }}
++            />
++            <div className="countdown-actions">
++              <button onClick={save} disabled={!when}>Speichern</button>
++              {countdown && <button className="secondary" onClick={() => setEditing(false)}>Abbrechen</button>}
++            </div>
++            <div className="countdown-hint">Wird automatisch auch bei {partnerName} eingetragen. Deine Katze erinnert euch rechtzeitig 🐾</div>
++          </div>
++        )}
++      </div>
++    </div>
++  );
++}
+diff --git a/src/components/CoupleCorner.tsx b/src/components/CoupleCorner.tsx
+index ad2c641..ca633b0 100644
+--- a/src/components/CoupleCorner.tsx
++++ b/src/components/CoupleCorner.tsx
+@@ -12,22 +12,13 @@ export interface Countdown {
+   label: string;
+ }
+ 
+-export const CORNER_W = 250;
+-export const CORNER_H = 130;
++export const CORNER_W = 180;
++export const CORNER_H = 90;
+ 
+ export function todayStr(d = new Date()): string {
+   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+ }
+ 
+-function plantLook(points: number): { emoji: string; size: number; label: string } {
+-  if (points >= 21) return { emoji: "💐", size: 40, label: "in voller Blüte!" };
+-  if (points >= 14) return { emoji: "🌷", size: 38, label: "blüht" };
+-  if (points >= 8) return { emoji: "🌷", size: 30, label: "Knospe" };
+-  if (points >= 4) return { emoji: "🌿", size: 30, label: "wächst" };
+-  if (points >= 1) return { emoji: "🌱", size: 26, label: "Keimling" };
+-  return { emoji: "🟤", size: 12, label: "Samen – gieß mich!" };
+-}
+-
+ function daysUntil(date: string): number {
+   const [y, m, d] = date.split("-").map(Number);
+   const target = new Date(y, m - 1, d).getTime();
+@@ -37,19 +28,15 @@ function daysUntil(date: string): number {
+ }
+ 
+ interface CoupleCornerProps {
+-  partnerName: string;
+-  plant: PlantState;
+   countdown: Countdown | null;
+-  onWater: () => void;
+   onSetCountdown: (c: Countdown | null) => void;
+   onEditingChange: (editing: boolean) => void;
+ }
+ 
+-export default function CoupleCorner({ partnerName, plant, countdown, onWater, onSetCountdown, onEditingChange }: CoupleCornerProps) {
++export default function CoupleCorner({ countdown, onSetCountdown, onEditingChange }: CoupleCornerProps) {
+   const [editing, setEditingState] = useState(false);
+   const [date, setDate] = useState(countdown?.date ?? "");
+   const [label, setLabel] = useState(countdown?.label ?? "");
+-  const [splash, setSplash] = useState(0);
+ 
+   const setEditing = (v: boolean) => {
+     setEditingState(v);
+@@ -60,11 +47,6 @@ export default function CoupleCorner({ partnerName, plant, countdown, onWater, o
+     }
+   };
+ 
+-  const today = todayStr();
+-  const wilted = plant.points > 0 && plant.lastWater !== undefined && Date.now() - plant.lastWater > 3 * 86_400_000;
+-  const look = plantLook(plant.points);
+-  const meDone = plant.waterMe === today;
+-  const themDone = plant.waterThem === today;
+ 
+   let cdText = "";
+   if (countdown) {
+@@ -77,28 +59,6 @@ export default function CoupleCorner({ partnerName, plant, countdown, onWater, o
+ 
+   return (
+     <div className="couple-corner" style={{ width: CORNER_W, height: CORNER_H }}>
+-      <div
+-        className={`couple-plant ${wilted ? "wilted" : ""}`}
+-        onClick={() => {
+-          if (meDone) return;
+-          setSplash(Date.now());
+-          onWater();
+-        }}
+-        title={meDone ? "Heute schon gegossen 💧" : "Klicken zum Gießen 💧"}
+-      >
+-        {splash > 0 && (
+-          <div className="couple-water" key={splash}>
+-            <span>💧</span><span>💧</span><span>💧</span>
+-          </div>
+-        )}
+-        <div className="couple-plant-emoji" style={{ fontSize: look.size }}>{wilted ? "🥀" : look.emoji}</div>
+-        <div className="couple-pot" />
+-        <div className="couple-plant-info">
+-          <span className={meDone ? "done" : ""}>💧 du</span>
+-          <span className={themDone ? "done" : ""}>💧 {partnerName}</span>
+-        </div>
+-      </div>
+-
+       <div className="couple-sign" onClick={() => !editing && setEditing(true)} title="Countdown einstellen">
+         {!editing && (countdown ? <span>📅 {cdText}</span> : <span className="couple-sign-empty">📅 Countdown setzen…</span>)}
+         {editing && (
+@@ -118,7 +78,6 @@ export default function CoupleCorner({ partnerName, plant, countdown, onWater, o
+           </div>
+         )}
+       </div>
+-      <div className="couple-plant-label">{wilted ? "Durstig! 🥺" : look.label}</div>
+     </div>
+   );
+ }
+diff --git a/src/components/MoreMenu.tsx b/src/components/MoreMenu.tsx
+index 9c7238c..90ba58f 100644
+--- a/src/components/MoreMenu.tsx
++++ b/src/components/MoreMenu.tsx
+@@ -43,6 +43,7 @@ const CATEGORIES: Category[] = [
+     name: "Social",
+     items: [
+       { action: "messages", icon: "💌", label: "Nachrichten" },
++      { action: "countdown", icon: "⏳", label: "Countdown" },
+       { action: "friends", icon: "\uD83D\uDC3E", label: "Friends" },
+       { action: "settings", icon: "\u2699\uFE0F", label: "Style" },
+     ],
+diff --git a/src/components/PlantWidget.tsx b/src/components/PlantWidget.tsx
+new file mode 100644
+index 0000000..131847f
+--- /dev/null
++++ b/src/components/PlantWidget.tsx
+@@ -0,0 +1,247 @@
++import { useMemo, useRef, useState } from "react";
++import type { PlantState } from "./CoupleCorner";
++import { todayStr } from "./CoupleCorner";
++
++// ---------------------------------------------------------------------------
++// A shared plant that grows very slowly (each watering = 1 point, max 2/day when
++// both water). After a few months it becomes a huge blossoming tree.
++// ---------------------------------------------------------------------------
++
++export interface PlantPos { x: number; y: number } // bottom-center of the pot
++
++function rng(seed: number) {
++  let s = seed >>> 0;
++  return () => {
++    s = (s * 1664525 + 1013904223) >>> 0;
++    return s / 4294967296;
++  };
++}
++
++function bezier(t: number, p0: number, p1: number, p2: number, p3: number) {
++  const u = 1 - t;
++  return u * u * u * p0 + 3 * u * u * t * p1 + 3 * u * t * t * p2 + t * t * t * p3;
++}
++
++export function plantHeight(points: number) {
++  const max = Math.max(200, window.innerHeight * 0.85);
++  return Math.min(max, 14 + points * 3.4);
++}
++
++export function potWidth(points: number) {
++  return Math.min(110, 42 + points * 0.35);
++}
++
++export function plantStage(points: number): string {
++  if (points >= 180) return "Zauberbaum ✨";
++  if (points >= 130) return "Blütenbaum 🌸";
++  if (points >= 90) return "kleiner Baum";
++  if (points >= 55) return "großer Busch";
++  if (points >= 30) return "blüht 🌷";
++  if (points >= 15) return "Knospe";
++  if (points >= 5) return "wächst";
++  if (points >= 1) return "Keimling";
++  return "Samen – gieß mich!";
++}
++
++const PETALS = ["#ff8fb5", "#ffb3cf", "#ff6f9c", "#ffc9de", "#f78fd0", "#ffd36e"];
++
++function Flower({ x, y, r, seed }: { x: number; y: number; r: number; seed: number }) {
++  const rand = rng(seed);
++  const color = PETALS[Math.floor(rand() * PETALS.length)];
++  const petals = 5;
++  const rot = rand() * 72;
++  return (
++    <g transform={`translate(${x},${y}) rotate(${rot})`}>
++      {Array.from({ length: petals }, (_, i) => {
++        const a = (i / petals) * Math.PI * 2;
++        return <ellipse key={i} cx={Math.cos(a) * r * 0.62} cy={Math.sin(a) * r * 0.62} rx={r * 0.55} ry={r * 0.4} fill={color} transform={`rotate(${(a * 180) / Math.PI} ${Math.cos(a) * r * 0.62} ${Math.sin(a) * r * 0.62})`} />;
++      })}
++      <circle r={r * 0.32} fill="#ffe066" />
++    </g>
++  );
++}
++
++function Leaf({ x, y, len, angle, wilted }: { x: number; y: number; len: number; angle: number; wilted: boolean }) {
++  const a = wilted ? angle + (angle > 0 ? 35 : -35) : angle;
++  return (
++    <path
++      d={`M0,0 Q${len / 2},${-len / 3} ${len},0 Q${len / 2},${len / 3} 0,0`}
++      fill={wilted ? "#9aa66b" : "#5dbb63"}
++      stroke={wilted ? "#6f7a45" : "#3d8b45"}
++      strokeWidth={0.8}
++      transform={`translate(${x},${y}) rotate(${a})`}
++    />
++  );
++}
++
++function PlantSvg({ points, wilted }: { points: number; wilted: boolean }) {
++  const H = plantHeight(points);
++  const W = Math.max(90, H * 0.9);
++  const stemW = Math.min(16, 2 + points * 0.08);
++
++  const parts = useMemo(() => {
++    const els: JSX.Element[] = [];
++    if (points < 1) {
++      els.push(<ellipse key="seed" cx={0} cy={-3} rx={5} ry={3.5} fill="#8a5a2b" />);
++      return els;
++    }
++    const sway = H * 0.07;
++    const c = { x0: 0, y0: 0, x1: sway, y1: -H / 3, x2: -sway, y2: (-2 * H) / 3, x3: 0, y3: -H };
++    const pt = (t: number) => ({ x: bezier(t, c.x0, c.x1, c.x2, c.x3), y: bezier(t, c.y0, c.y1, c.y2, c.y3) });
++
++    // Branches (after a bush stage)
++    const branchCount = points >= 45 ? Math.min(9, Math.floor((points - 45) / 16) + 1) : 0;
++    for (let i = 0; i < branchCount; i++) {
++      const rand = rng(1000 + i * 17);
++      const t = 0.32 + (i / Math.max(1, branchCount)) * 0.55 + rand() * 0.04;
++      const p = pt(t);
++      const side = i % 2 === 0 ? 1 : -1;
++      const grow = Math.min(1, (points - 45 - i * 16) / 40);
++      const len = H * (0.22 + rand() * 0.12) * Math.max(0.2, grow) * (1 - t * 0.35);
++      const ex = p.x + side * len;
++      const ey = p.y - len * 0.55;
++      const bw = Math.max(1.5, stemW * 0.45 * (1 - t * 0.5));
++      els.push(<path key={`b${i}`} d={`M${p.x},${p.y} Q${p.x + side * len * 0.5},${p.y - len * 0.05} ${ex},${ey}`} stroke={wilted ? "#7a6a4a" : "#6b4a2b"} strokeWidth={bw} fill="none" strokeLinecap="round" />);
++      const nl = Math.min(7, 2 + Math.floor(grow * 5));
++      for (let k = 1; k <= nl; k++) {
++        const tt = k / (nl + 1);
++        const lx = p.x + (ex - p.x) * tt;
++        const ly = p.y + (ey - p.y) * tt - Math.sin(tt * Math.PI) * len * 0.05;
++        els.push(<Leaf key={`b${i}l${k}`} x={lx} y={ly} len={10 + Math.min(22, points * 0.1)} angle={(k % 2 ? -1 : 1) * 50 - 90 + side * 30} wilted={wilted} />);
++      }
++      if (points >= 70 && !wilted) {
++        const fr = Math.min(22, 7 + (points - 70) * 0.08);
++        els.push(<Flower key={`bf${i}`} x={ex} y={ey} r={fr} seed={i * 7 + 3} />);
++        if (points >= 130) {
++          els.push(<Flower key={`bf2${i}`} x={p.x + (ex - p.x) * 0.55} y={p.y + (ey - p.y) * 0.55 - 6} r={fr * 0.7} seed={i * 13 + 5} />);
++        }
++      }
++    }
++
++    // Main stem
++    els.push(
++      <path key="stem" d={`M${c.x0},${c.y0} C${c.x1},${c.y1} ${c.x2},${c.y2} ${c.x3},${c.y3}`} stroke={wilted ? "#7f8f55" : points >= 90 ? "#6b4a2b" : "#3f9a48"} strokeWidth={stemW} fill="none" strokeLinecap="round" />,
++    );
++
++    // Leaves along the stem
++    const leafCount = Math.min(36, Math.floor(points / 2) + 1);
++    for (let i = 0; i < leafCount; i++) {
++      const t = 0.12 + (i / Math.max(1, leafCount)) * 0.82;
++      const p = pt(t);
++      const side = i % 2 === 0 ? 1 : -1;
++      const len = (9 + Math.min(30, points * 0.22)) * (1 - t * 0.35);
++      els.push(<Leaf key={`l${i}`} x={p.x} y={p.y} len={len} angle={side > 0 ? -35 : -145} wilted={wilted} />);
++    }
++
++    // Top: bud → flower → crown of flowers
++    const top = pt(1);
++    if (points >= 15 && points < 30) {
++      els.push(<ellipse key="bud" cx={top.x} cy={top.y - 6} rx={6} ry={9} fill={wilted ? "#b38a9a" : "#ff9fc0"} stroke="#3f9a48" strokeWidth={1.5} />);
++    } else if (points >= 30) {
++      const r = Math.min(46, 10 + (points - 30) * 0.18);
++      if (points >= 110 && !wilted) {
++        for (let k = 0; k < 6; k++) {
++          const a = (k / 6) * Math.PI * 2;
++          els.push(<Flower key={`crown${k}`} x={top.x + Math.cos(a) * r * 1.2} y={top.y - r * 0.6 + Math.sin(a) * r * 0.7} r={r * 0.55} seed={k * 31 + 11} />);
++        }
++      }
++      els.push(<Flower key="top" x={top.x} y={top.y - r * 0.6} r={wilted ? r * 0.7 : r} seed={42} />);
++    }
++    return els;
++  }, [points, wilted, H, stemW]);
++
++  return (
++    <svg
++      className={`plant-svg ${wilted ? "wilted" : ""}`}
++      width={W}
++      height={H + 60}
++      viewBox={`${-W / 2} ${-H - 50} ${W} ${H + 60}`}
++      style={{ filter: wilted ? "grayscale(0.55)" : undefined }}
++    >
++      <g className="plant-sway">{parts}</g>
++    </svg>
++  );
++}
++
++interface PlantWidgetProps {
++  plant: PlantState;
++  partnerName: string;
++  pos: PlantPos;
++  onMove: (pos: PlantPos) => void;
++  onWater: () => void;
++  onDragChange: (dragging: boolean) => void;
++}
++
++export const POT_H = 34;
++
++export default function PlantWidget({ plant, partnerName, pos, onMove, onWater, onDragChange }: PlantWidgetProps) {
++  const [splash, setSplash] = useState(0);
++  const dragRef = useRef<{ sx: number; sy: number; ox: number; oy: number; moved: boolean } | null>(null);
++  const today = todayStr();
++  const meDone = plant.waterMe === today;
++  const themDone = plant.waterThem === today;
++  const wilted = plant.points > 0 && plant.lastWater !== undefined && Date.now() - plant.lastWater > 3 * 86_400_000;
++  const potW = potWidth(plant.points);
++  const H = plantHeight(plant.points);
++
++  const onMouseDown = (e: React.MouseEvent) => {
++    e.preventDefault();
++    dragRef.current = { sx: e.clientX, sy: e.clientY, ox: pos.x, oy: pos.y, moved: false };
++    const move = (ev: MouseEvent) => {
++      const d = dragRef.current;
++      if (!d) return;
++      const dx = ev.clientX - d.sx;
++      const dy = ev.clientY - d.sy;
++      if (!d.moved && Math.abs(dx) + Math.abs(dy) > 5) {
++        d.moved = true;
++        onDragChange(true);
++      }
++      if (d.moved) {
++        onMove({
++          x: Math.max(potW / 2, Math.min(window.innerWidth - potW / 2, d.ox + dx)),
++          y: Math.max(POT_H + 40, Math.min(window.innerHeight - 4, d.oy + dy)),
++        });
++      }
++    };
++    const up = () => {
++      window.removeEventListener("mousemove", move);
++      window.removeEventListener("mouseup", up);
++      const d = dragRef.current;
++      dragRef.current = null;
++      if (d?.moved) {
++        onDragChange(false);
++      } else if (!meDone) {
++        setSplash(Date.now());
++        onWater();
++      }
++    };
++    window.addEventListener("mousemove", move);
++    window.addEventListener("mouseup", up);
++  };
++
++  return (
++    <div className="plant-widget" style={{ left: pos.x, top: pos.y }}>
++      <div className="plant-graphic" style={{ bottom: POT_H - 6 }}>
++        <PlantSvg points={plant.points} wilted={wilted} />
++      </div>
++      {splash > 0 && (
++        <div className="couple-water" key={splash} style={{ bottom: POT_H + Math.min(H, 120) * 0.5 }}>
++          <span>💧</span><span>💧</span><span>💧</span>
++        </div>
++      )}
++      <div
++        className="plant-pot"
++        style={{ width: potW, height: POT_H }}
++        onMouseDown={onMouseDown}
++        title={meDone ? "Heute schon gegossen 💧 (ziehen zum Verschieben)" : "Klicken zum Gießen 💧 · Ziehen zum Verschieben"}
++      >
++        <div className="plant-pot-rim" />
++      </div>
++      <div className="plant-info">
++        <span className={meDone ? "done" : ""}>💧 du</span>
++        <span className={themDone ? "done" : ""}>💧 {partnerName}</span>
++      </div>
++      <div className="plant-label">{wilted ? "Durstig! 🥺" : plantStage(plant.points)}</div>
++    </div>
++  );
++}
+diff --git a/src/components/RadialMenu.tsx b/src/components/RadialMenu.tsx
+index 321aa45..1ba1be2 100644
+--- a/src/components/RadialMenu.tsx
++++ b/src/components/RadialMenu.tsx
+@@ -1,6 +1,6 @@
+ import "../styles/menu.css";
+ 
+-export type MenuAction = "chat" | "search" | "music" | "nap" | "home" | "settings" | "journal" | "achievements" | "friends" | "notes" | "feed" | "timer" | "yarn" | "messages";
++export type MenuAction = "chat" | "search" | "music" | "nap" | "home" | "settings" | "journal" | "achievements" | "friends" | "notes" | "feed" | "timer" | "yarn" | "messages" | "countdown" | "kiss" | "sendimage";
+ 
+ interface MenuItem {
+   action: MenuAction | "more";
+diff --git a/src/components/YarnBall.tsx b/src/components/YarnBall.tsx
+index b2b1f4e..e74ff5d 100644
+--- a/src/components/YarnBall.tsx
++++ b/src/components/YarnBall.tsx
+@@ -22,8 +22,9 @@ interface YarnBallProps {
+   onGone: () => void;
+ }
+ 
+-const R = 14;
+-const GRAVITY = 0.45;
++const R = 16;
++const GRAVITY = 0.07;
++const TRAIL = 28;
+ const IDLE_TIMEOUT = 90_000;
+ 
+ const YarnBall = forwardRef<YarnHandle, YarnBallProps>(function YarnBall(
+@@ -31,7 +32,9 @@ const YarnBall = forwardRef<YarnHandle, YarnBallProps>(function YarnBall(
+   ref,
+ ) {
+   const s = useRef<YarnState>({ ...initial });
+-  const [draw, setDraw] = useState({ x: initial.x, y: initial.y, rot: 0 });
++  const [draw, setDraw] = useState({ x: initial.x, y: initial.y, rot: 0, squash: 0, trail: [] as { x: number; y: number }[] });
++  const trail = useRef<{ x: number; y: number }[]>([]);
++  const squash = useRef(0);
+   const dragging = useRef(false);
+   const lastMoves = useRef<{ x: number; y: number; t: number }[]>([]);
+   const rot = useRef(0);
+@@ -62,16 +65,21 @@ const YarnBall = forwardRef<YarnHandle, YarnBallProps>(function YarnBall(
+       const floor = window.innerHeight - R - 6;
+       if (!dragging.current) {
+         b.vy += GRAVITY;
++        b.vx *= 0.996;
++        b.vy *= 0.996;
+         b.x += b.vx;
+         b.y += b.vy;
+         if (b.y > floor) {
+           b.y = floor;
+-          b.vy = Math.abs(b.vy) > 1.5 ? -b.vy * 0.55 : 0;
+-          b.vx *= 0.96;
++          if (Math.abs(b.vy) > 2) squash.current = Math.min(0.35, Math.abs(b.vy) / 40);
++          b.vy = Math.abs(b.vy) > 1 ? -b.vy * 0.75 : 0;
++          b.vx *= 0.97;
+         }
++        if (b.y >= floor - 0.5) b.vx *= 0.988; // rolling friction
+         if (b.y < R) {
+           b.y = R;
+-          b.vy = Math.abs(b.vy) * 0.5;
++          b.vy = Math.abs(b.vy) * 0.75;
++          squash.current = Math.min(0.3, Math.abs(b.vy) / 40);
+         }
+         if (b.x < -R || b.x > w + R) {
+           const side = b.x < 0 ? "left" : "right";
+@@ -83,10 +91,10 @@ const YarnBall = forwardRef<YarnHandle, YarnBallProps>(function YarnBall(
+           }
+           // Nobody to send it to: bounce back
+           b.x = side === "left" ? R : w - R;
+-          b.vx = -b.vx * 0.6;
++          b.vx = -b.vx * 0.8;
+         }
+         if (Math.abs(b.vx) < 0.05) b.vx = 0;
+-        rot.current += b.vx * 4;
++        rot.current += (b.vx / R) * (180 / Math.PI);
+         if (Math.abs(b.vx) > 0.3 || Math.abs(b.vy) > 1) lastActivity.current = Date.now();
+       } else {
+         lastActivity.current = Date.now();
+@@ -98,7 +106,10 @@ const YarnBall = forwardRef<YarnHandle, YarnBallProps>(function YarnBall(
+         return;
+       }
+ 
+-      setDraw({ x: b.x, y: b.y, rot: rot.current });
++      squash.current *= 0.82;
++      trail.current.push({ x: b.x, y: b.y });
++      if (trail.current.length > TRAIL) trail.current.shift();
++      setDraw({ x: b.x, y: b.y, rot: rot.current, squash: squash.current, trail: trail.current.slice() });
+       if (t - lastReport > 80) {
+         lastReport = t;
+         cbs.current.onPosition({ x: b.x, y: b.y });
+@@ -122,18 +133,22 @@ const YarnBall = forwardRef<YarnHandle, YarnBallProps>(function YarnBall(
+       s.current.x = ev.clientX;
+       s.current.y = ev.clientY;
+       lastMoves.current.push({ x: ev.clientX, y: ev.clientY, t: performance.now() });
+-      if (lastMoves.current.length > 6) lastMoves.current.shift();
++      if (lastMoves.current.length > 12) lastMoves.current.shift();
+     };
+     const up = () => {
+       window.removeEventListener("mousemove", move);
+       window.removeEventListener("mouseup", up);
++      // Velocity from the last ~80 ms of movement (px per 16 ms frame), boosted for long throws
+       const m = lastMoves.current;
+-      const a = m[0];
+       const b = m[m.length - 1];
+-      const dt = Math.max(16, b.t - a.t);
+-      // px per frame (~16ms)
+-      s.current.vx = Math.max(-40, Math.min(40, ((b.x - a.x) / dt) * 16));
+-      s.current.vy = Math.max(-40, Math.min(40, ((b.y - a.y) / dt) * 16));
++      const now = performance.now();
++      const recent = m.filter((p) => now - p.t < 90);
++      const a = recent.length > 1 ? recent[0] : m[Math.max(0, m.length - 2)];
++      const dt = Math.max(12, b.t - a.t);
++      const fresh = now - b.t < 120; // mouse still moving when released
++      const k = fresh ? 1.6 : 0.3;
++      s.current.vx = Math.max(-75, Math.min(75, ((b.x - a.x) / dt) * 16 * k));
++      s.current.vy = Math.max(-60, Math.min(60, ((b.y - a.y) / dt) * 16 * k));
+       dragging.current = false;
+       cbs.current.onDragChange(false);
+     };
+@@ -141,15 +156,43 @@ const YarnBall = forwardRef<YarnHandle, YarnBallProps>(function YarnBall(
+     window.addEventListener("mouseup", up);
+   };
+ 
++  const sq = draw.squash;
++  const pts = draw.trail;
++  const path = pts.length > 1
++    ? pts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x.toFixed(1)},${(p.y + Math.sin(i * 0.9) * 2).toFixed(1)}`).join(" ")
++    : "";
++
+   return (
+-    <div
+-      className="yarn-ball"
+-      style={{ left: draw.x - R, top: draw.y - R, width: R * 2, height: R * 2, transform: `rotate(${draw.rot}deg)` }}
+-      onMouseDown={onMouseDown}
+-      title="Werfen! Raus über den Rand → landet bei deinem Schatz"
+-    >
+-      🧶
+-    </div>
++    <>
++      {path && (
++        <svg className="yarn-trail" width={window.innerWidth} height={window.innerHeight}>
++          <path d={path} fill="none" stroke="#e0507a" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" opacity={0.55} />
++        </svg>
++      )}
++      <div
++        className="yarn-ball"
++        style={{
++          left: draw.x - R,
++          top: draw.y - R,
++          width: R * 2,
++          height: R * 2,
++          transform: `scale(${1 + sq * 0.6}, ${1 - sq})`,
++          transformOrigin: "50% 100%",
++        }}
++        onMouseDown={onMouseDown}
++        title="Werfen! Raus über den Rand → landet bei deinem Schatz"
++      >
++        <svg viewBox="-16 -16 32 32" width={R * 2} height={R * 2} style={{ transform: `rotate(${draw.rot}deg)` }}>
++          <circle r="15" fill="#ff7aa2" stroke="#c43c66" strokeWidth="1.5" />
++          <path d="M-13,-6 Q0,-16 13,-6" stroke="#c43c66" strokeWidth="1.4" fill="none" />
++          <path d="M-14,2 Q0,-10 14,2" stroke="#c43c66" strokeWidth="1.4" fill="none" />
++          <path d="M-12,9 Q0,-2 12,9" stroke="#c43c66" strokeWidth="1.4" fill="none" />
++          <path d="M-6,-14 Q6,0 -4,14" stroke="#ffd0de" strokeWidth="1.2" fill="none" />
++          <path d="M2,-15 Q13,0 5,14" stroke="#ffd0de" strokeWidth="1.2" fill="none" />
++          <circle cx="-5" cy="-6" r="3" fill="#ffd0de" opacity="0.6" />
++        </svg>
++      </div>
++    </>
+   );
+ });
+ 
+diff --git a/src/lib/actions.ts b/src/lib/actions.ts
+index e880c05..0a36a95 100644
+--- a/src/lib/actions.ts
++++ b/src/lib/actions.ts
+@@ -12,7 +12,7 @@ export type PetAction =
+   | { t: "play" }
+   | { t: "yarn"; side: "left" | "right"; y: number; vx: number; vy: number }
+   | { t: "water"; points: number }
+-  | { t: "countdown"; date: string | null; label: string };
++  | { t: "countdown"; at: number | null; label: string };
+ 
+ const ACTION_TYPES = ["feed", "pet", "img", "kiss", "cuddle", "play", "yarn", "water", "countdown"];
+ 
+diff --git a/src/styles/friends.css b/src/styles/friends.css
+index b866daa..cd5b06e 100644
+--- a/src/styles/friends.css
++++ b/src/styles/friends.css
+@@ -1054,3 +1054,135 @@
+ }
+ 
+ .chat-zoom img { max-width: 95%; max-height: 95%; border-radius: 8px; }
++
++/* Draggable shared plant */
++.plant-widget {
++  position: absolute;
++  z-index: 985;
++  width: 0;
++  height: 0;
++  pointer-events: none;
++  font-family: 'Comic Sans MS', 'Chalkboard SE', cursive;
++}
++
++.plant-graphic {
++  position: absolute;
++  left: 0;
++  transform: translateX(-50%);
++  pointer-events: none;
++}
++
++.plant-svg { display: block; overflow: visible; }
++
++.plant-sway {
++  transform-origin: 0px 0px;
++  animation: plant-sway 6s ease-in-out infinite;
++}
++
++.plant-svg.wilted .plant-sway { animation: none; transform: rotate(4deg); }
++
++@keyframes plant-sway {
++  0%, 100% { transform: rotate(-1.2deg); }
++  50% { transform: rotate(1.2deg); }
++}
++
++.plant-pot {
++  position: absolute;
++  left: 0;
++  bottom: 0;
++  transform: translateX(-50%);
++  pointer-events: auto;
++  cursor: grab;
++  background: linear-gradient(#d9774a, #b85a33);
++  clip-path: polygon(0 0, 100% 0, 86% 100%, 14% 100%);
++}
++
++.plant-pot-rim {
++  position: absolute;
++  left: 0;
++  right: 0;
++  top: 0;
++  height: 7px;
++  background: #8f4424;
++}
++
++.plant-info {
++  position: absolute;
++  left: 0;
++  top: 4px;
++  transform: translateX(-50%);
++  display: flex;
++  gap: 4px;
++  font-size: 9px;
++  background: rgba(255, 255, 255, 0.9);
++  border-radius: 8px;
++  padding: 1px 6px;
++  white-space: nowrap;
++}
++
++.plant-info span { opacity: 0.35; }
++.plant-info span.done { opacity: 1; color: #2a7bd4; font-weight: 700; }
++
++.plant-label {
++  position: absolute;
++  left: 0;
++  top: 20px;
++  transform: translateX(-50%);
++  font-size: 9px;
++  color: #fff;
++  white-space: nowrap;
++  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7);
++}
++
++.plant-widget .couple-water { position: absolute; left: 0; top: auto; }
++
++/* Countdown panel */
++.countdown-panel {
++  width: 340px;
++  background: #fff7fa;
++  border: 2px solid #f3c1d3;
++  border-radius: 16px;
++  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
++  overflow: hidden;
++  font-family: 'Comic Sans MS', 'Chalkboard SE', cursive;
++}
++
++.countdown-view, .countdown-edit { padding: 18px; display: flex; flex-direction: column; gap: 8px; }
++.countdown-view { align-items: center; text-align: center; }
++.countdown-label { font-size: 15px; color: #b0456f; font-weight: 700; }
++.countdown-big { font-size: 26px; font-weight: 700; color: #ff6f9c; }
++.countdown-when { font-size: 11px; color: #a88; }
++.countdown-edit label { font-size: 11px; color: #a88; }
++.countdown-edit input {
++  font-family: inherit;
++  font-size: 13px;
++  border: 2px solid #f3c1d3;
++  border-radius: 10px;
++  padding: 6px 10px;
++  outline: none;
++}
++.countdown-actions { display: flex; gap: 8px; margin-top: 6px; }
++.countdown-actions button {
++  font-family: inherit;
++  font-size: 13px;
++  border: none;
++  border-radius: 10px;
++  padding: 6px 14px;
++  background: #ff8fb5;
++  color: white;
++  cursor: pointer;
++}
++.countdown-actions button.secondary { background: #ffe3ee; color: #b0456f; }
++.countdown-actions button:disabled { opacity: 0.5; cursor: default; }
++.countdown-hint { font-size: 10px; color: #b99; }
++
++.yarn-trail {
++  position: absolute;
++  left: 0;
++  top: 0;
++  pointer-events: none;
++  z-index: 1001;
++}
++
++.yarn-ball { font-size: 0; filter: drop-shadow(0 3px 3px rgba(0, 0, 0, 0.3)); }
++.yarn-ball:active { cursor: grabbing; }
+diff --git a/src/styles/menu.css b/src/styles/menu.css
+index 0d50276..9015b9f 100644
+--- a/src/styles/menu.css
++++ b/src/styles/menu.css
+@@ -312,3 +312,73 @@
+   color: #555;
+   text-align: center;
+ }
++
++/* New all-in-one cat menu */
++.cat-menu-backdrop {
++  position: fixed;
++  inset: 0;
++  pointer-events: auto;
++  z-index: 1500;
++}
++
++.cat-menu {
++  position: absolute;
++  z-index: 1501;
++  pointer-events: auto;
++  background: #fff7fa;
++  border: 2px solid #f3c1d3;
++  border-radius: 18px;
++  box-shadow: 0 10px 30px rgba(176, 69, 111, 0.25);
++  padding: 10px 10px 6px;
++  font-family: 'Comic Sans MS', 'Chalkboard SE', cursive;
++  animation: cat-menu-pop 0.18s ease-out;
++}
++
++@keyframes cat-menu-pop {
++  from { opacity: 0; transform: scale(0.92) translateY(8px); }
++  to { opacity: 1; transform: scale(1) translateY(0); }
++}
++
++.cat-menu-group { margin-bottom: 6px; }
++.cat-menu-title { font-size: 11px; font-weight: 700; color: #b0456f; margin: 0 0 4px 4px; }
++
++.cat-menu-grid {
++  display: grid;
++  grid-template-columns: repeat(5, 1fr);
++  gap: 4px;
++}
++
++.cat-menu-tile {
++  position: relative;
++  display: flex;
++  flex-direction: column;
++  align-items: center;
++  gap: 2px;
++  padding: 6px 2px 4px;
++  border: none;
++  border-radius: 12px;
++  background: white;
++  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
++  cursor: pointer;
++  font-family: inherit;
++  transition: transform 0.12s ease, background 0.12s ease;
++  animation: cat-menu-pop 0.22s ease-out both;
++}
++
++.cat-menu-tile:hover { background: #ffe3ee; transform: translateY(-2px) scale(1.05); }
++.cat-menu-tile.disabled { opacity: 0.4; cursor: default; }
++.cat-menu-tile.disabled:hover { transform: none; background: white; }
++.cat-menu-icon { font-size: 20px; line-height: 1.1; }
++.cat-menu-label { font-size: 9px; color: #6b4a5a; white-space: nowrap; }
++
++.cat-menu-badge {
++  position: absolute;
++  top: 2px;
++  right: 6px;
++  background: #ff4f86;
++  color: white;
++  font-size: 9px;
++  font-weight: 700;
++  border-radius: 8px;
++  padding: 0 5px;
++}

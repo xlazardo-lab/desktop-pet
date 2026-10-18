@@ -1,0 +1,1522 @@
+diff --git a/src/App.tsx b/src/App.tsx
+index c3f89a7..c1672d6 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -14,6 +14,11 @@ import VisitingPet from "./components/VisitingPet";
+ import ImageCard, { ReceivedImage, imageCardCenter, IMAGE_CARD_W, IMAGE_CARD_H } from "./components/ImageCard";
+ import { imageFileToDataUrl, pickImageFile } from "./lib/actions";
+ import type { IncomingInteraction } from "./hooks/useFriends";
++import YarnBall, { YarnHandle, YarnState } from "./components/YarnBall";
++import CoupleCorner, { PlantState, Countdown, CORNER_W, CORNER_H, todayStr } from "./components/CoupleCorner";
++import { useActiveTime } from "./hooks/useActiveTime";
++import { packColor } from "./lib/look";
++import ChatPanel, { ChatEntry } from "./components/ChatPanel";
+ import StickyNoteComponent from "./components/StickyNote";
+ import NotesPanel from "./components/NotesPanel";
+ import MoreMenu from "./components/MoreMenu";
+@@ -79,10 +84,70 @@ export default function App() {
+   const { achievements, unlocked, newlyUnlocked, dismissToast, manualUnlock } = useAchievements(eventData);
+   const { entries, generateToday, todayGenerated, loading: journalLoading } = useJournal(eventData);
+   const interactionHandlerRef = useRef<(i: IncomingInteraction) => void>();
++  // ---- Message history (kept locally so nothing gets lost) ----
++  const [chatLog, setChatLog] = useState<ChatEntry[]>(() => {
++    try { return JSON.parse(localStorage.getItem("chat-log") || "[]"); } catch { return []; }
++  });
++  const [chatReadTs, setChatReadTs] = useState<number>(() => {
++    try { return Number(localStorage.getItem("chat-read") || "0") || 0; } catch { return 0; }
++  });
++  const [messagesOpen, setMessagesOpen] = useState(false);
++  const addChat = useCallback((e: ChatEntry) => {
++    setChatLog((prev) => {
++      if (prev.some((p) => p.id === e.id)) return prev;
++      let next = [...prev, e].slice(-300);
++      // Keep only the newest 25 pictures to stay within storage limits
++      let imgs = 0;
++      next = next.slice().reverse().map((x) => {
++        if (!x.img) return x;
++        imgs++;
++        return imgs > 25 ? { ...x, img: undefined, text: x.text || "🖼️ (älteres Bild)" } : x;
++      }).reverse();
++      for (let n = next.length; n > 0; n = Math.floor(n * 0.8)) {
++        try { localStorage.setItem("chat-log", JSON.stringify(next.slice(-n))); break; } catch { /* quota → shrink */ }
++      }
++      return next;
++    });
++  }, []);
++  useEffect(() => {
++    if (messagesOpen) markChatReadRef.current?.();
++  }, [messagesOpen, chatLog.length]);
++  const markChatReadRef = useRef<() => void>();
++  const unreadCount = chatLog.filter((e) => !e.fromMe && e.ts > chatReadTs).length;
++  const markChatRead = useCallback(() => {
++    const now = Date.now();
++    setChatReadTs(now);
++    try { localStorage.setItem("chat-read", String(now)); } catch { /* ignore */ }
++  }, []);
++  markChatReadRef.current = markChatRead;
++  const [accessory, setAccessoryState] = useState<string | null>(() => {
++    try { return localStorage.getItem("pet-accessory"); } catch { return null; }
++  });
++  const setAccessory = useCallback((id: string | null) => {
++    setAccessoryState(id);
++    try {
++      if (id) localStorage.setItem("pet-accessory", id);
++      else localStorage.removeItem("pet-accessory");
++    } catch { /* ignore */ }
++  }, []);
++  const activeTime = useActiveTime((acc) => {
++    say(`Neues Accessoire freigeschaltet: ${acc.emoji} ${acc.name}! (Einstellungen)`, 8000);
++  });
+   const {
+     myPetCode, myPetName, registered, registering, friends, loadingFriends, connected,
+     register: registerPet, addFriend, acceptFriend, removeFriend, sendVisit, sendAction, startHangout, setMyPetName, currentVisit, dismissVisit,
+-  } = useFriends(breed, color, (i) => interactionHandlerRef.current?.(i));
++  } = useFriends(
++    breed,
++    packColor(color, accessory),
++    (i) => interactionHandlerRef.current?.(i),
++    (m) => addChat({ id: m.id, friendId: m.fromPetId, friendName: m.fromName, fromMe: false, text: m.text, ts: m.ts }),
++  );
++
++  // The "partner": the friend currently visiting, else the first mutual friend (online preferred)
++  const mutualFriends = friends.filter((f) => f.status === "mutual").sort((a, b) => a.id.localeCompare(b.id));
++  const partner = mutualFriends[0] ?? null;
++  const partnerName = partner?.name ?? "Schatz";
++  const spawnYarnRef = useRef<(s: YarnState) => void>();
+ 
+   const [shortcut, setShortcut] = useState(() =>
+     localStorage.getItem("chat-shortcut") || DEFAULT_SHORTCUT
+@@ -107,6 +172,21 @@ export default function App() {
+   const [petExtraStyle, setPetExtraStyle] = useState<React.CSSProperties>({});
+   const [visitorPos, setVisitorPos] = useState<{ x: number; y: number } | null>(null);
+   const [visitorOverlay, setVisitorOverlay] = useState(false);
++  const [yarn, setYarn] = useState<{ id: number; initial: YarnState } | null>(null);
++  const yarnRef = useRef<YarnHandle>(null);
++  const [yarnPos, setYarnPos] = useState<{ x: number; y: number } | null>(null);
++  const [yarnDragging, setYarnDragging] = useState(false);
++  const [petMoveMs, setPetMoveMs] = useState(0);
++  const [visitorEffect, setVisitorEffect] = useState<{ id: number; emojis: string[]; text?: string } | null>(null);
++  const [cornerEditing, setCornerEditing] = useState(false);
++  const [plant, setPlant] = useState<PlantState>(() => {
++    try { return JSON.parse(localStorage.getItem("couple-plant") || "") as PlantState; } catch { return { points: 0 }; }
++  });
++  const [countdown, setCountdownState] = useState<Countdown | null>(() => {
++    try { return JSON.parse(localStorage.getItem("couple-countdown") || "null"); } catch { return null; }
++  });
++  useEffect(() => { try { localStorage.setItem("couple-plant", JSON.stringify(plant)); } catch { /* ignore */ } }, [plant]);
++  useEffect(() => { try { localStorage.setItem("couple-countdown", JSON.stringify(countdown)); } catch { /* ignore */ } }, [countdown]);
+   const [receivedImages, setReceivedImages] = useState<ReceivedImage[]>([]);
+   const [petEffect, setPetEffect] = useState<{ id: number; emojis: string[] } | null>(null);
+   const feedFromRef = useRef<string | null>(null);
+@@ -114,6 +194,8 @@ export default function App() {
+   const [notePositions, setNotePositions] = useState<Map<string, { x: number; y: number }>>(new Map());
+ 
+   const positionRef = useRef(position);
++  const stateRef = useRef(state);
++  stateRef.current = state;
+   positionRef.current = position;
+ 
+   // Pulse pet when dragging snack is near
+@@ -128,7 +210,7 @@ export default function App() {
+     }
+   }, [nearPet, draggingSnack]);
+ 
+-  const overlayOpen = menuOpen || paletteOpen || dragging || settingsOpen || journalOpen || achievementsOpen || friendsOpen || notesOpen || moreOpen || timerOpen || feedOpen || !!draggingSnack || visitorOverlay;
++  const overlayOpen = menuOpen || paletteOpen || dragging || settingsOpen || journalOpen || achievementsOpen || friendsOpen || notesOpen || moreOpen || timerOpen || feedOpen || !!draggingSnack || visitorOverlay || yarnDragging || cornerEditing || messagesOpen;
+ 
+   const extraHitZones = [
+     ...(visitorPos ? [visitorPos] : []),
+@@ -139,6 +221,9 @@ export default function App() {
+     }) : []),
+     ...(timer.running ? [{ x: position.x - 50, y: position.y - 60, w: 80, h: 30 }] : []),
+     { x: position.x - 26, y: position.y + 33, w: 52, h: 6 },
++    ...(unreadCount > 0 ? [{ x: position.x + 34, y: position.y - 40, w: 50, h: 34 }] : []),
++    ...(yarnPos && yarnPos.x > -100 ? [{ x: yarnPos.x, y: yarnPos.y, w: 44, h: 44 }] : []),
++    ...(partner ? [{ x: 16 + CORNER_W / 2, y: window.innerHeight - 16 - CORNER_H / 2, w: CORNER_W + 10, h: CORNER_H + 10 }] : []),
+     ...(receivedImages.length > 0 ? [{ ...imageCardCenter(position.x, position.y), w: IMAGE_CARD_W + 10, h: IMAGE_CARD_H + 10 }] : []),
+   ];
+ 
+@@ -334,6 +419,12 @@ export default function App() {
+           trackEvent("timer");
+           setTimerOpen(true);
+           break;
++        case "messages":
++          setMessagesOpen(true);
++          break;
++        case "yarn":
++          spawnYarnRef.current?.({ x: positionRef.current.x, y: Math.max(40, positionRef.current.y - 80), vx: (Math.random() - 0.5) * 6, vy: -6 });
++          break;
+       }
+     },
+     [setState, generate, nap, goHome, dismiss, toggleMusic, musicPlaying, trackEvent, manualUnlock, state],
+@@ -365,6 +456,7 @@ export default function App() {
+     (message: string) => {
+       if (currentVisit) {
+         sendVisit(currentVisit.fromPetId, message);
++        addChat({ id: `me-${Date.now()}`, friendId: currentVisit.fromPetId, friendName: currentVisit.fromName, fromMe: true, text: message, ts: Date.now() });
+       }
+     },
+     [currentVisit, sendVisit],
+@@ -477,7 +569,32 @@ export default function App() {
+       }
+       say(`${i.fromName} streichelt mich ❤️ *schnurr*`, 5000);
+     } else if (a.t === "img") {
++      addChat({ id: i.id, friendId: i.fromPetId, friendName: i.fromName, fromMe: false, img: a.src, text: a.caption, ts: Date.now() });
+       setReceivedImages((prev) => [...prev, { id: i.id, fromName: i.fromName, src: a.src, caption: a.caption }]);
++    } else if (a.t === "kiss" || a.t === "cuddle" || a.t === "play") {
++      playCouple(a.t, i.fromName);
++      addChat({ id: i.id, friendId: i.fromPetId, friendName: i.fromName, fromMe: false, ts: Date.now(),
++        text: a.t === "kiss" ? "😘 hat dir ein Küsschen gegeben" : a.t === "cuddle" ? "🤗 wollte kuscheln" : "🐾 wollte spielen" });
++    } else if (a.t === "yarn") {
++      const fromLeft = a.side === "right"; // left their screen on the right → enters mine on the left
++      const speed = Math.max(4, Math.min(30, Math.abs(a.vx)));
++      setYarn({
++        id: Date.now(),
++        initial: {
++          x: fromLeft ? 5 : window.innerWidth - 5,
++          y: a.y * window.innerHeight,
++          vx: fromLeft ? speed : -speed,
++          vy: a.vy,
++        },
++      });
++      say(`${i.fromName} wirft dir das Wollknäuel zu! 🧶`, 4000);
++    } else if (a.t === "water") {
++      const today = todayStr();
++      setPlant((prev) => ({ ...prev, points: Math.max(prev.points + 1, a.points), waterThem: today, lastWater: Date.now() }));
++      say(`${i.fromName} hat unsere Blume gegossen 🌷💧`, 5000);
++    } else if (a.t === "countdown") {
++      setCountdownState(a.date ? { date: a.date, label: a.label } : null);
++      if (a.date) say(`${i.fromName} hat einen Countdown gesetzt: ${a.label} 📅`, 5000);
+     }
+   };
+ 
+@@ -493,6 +610,7 @@ export default function App() {
+         if (!chosen) return false;
+         const src = await imageFileToDataUrl(chosen);
+         const ok = await sendAction(friendId, { t: "img", src });
++        if (ok) addChat({ id: `me-${Date.now()}`, friendId, friendName: friendName(friendId), fromMe: true, img: src, ts: Date.now() });
+         say(ok ? `Bild an ${friendName(friendId)} geschickt! 📨` : "Hmm, das Bild ging nicht raus 😿", 4000);
+         return ok;
+       } catch (err) {
+@@ -512,6 +630,106 @@ export default function App() {
+ 
+   const closeImage = useCallback(() => setReceivedImages((prev) => prev.slice(1)), []);
+ 
++  // ---- Yarn ball ----
++  const yarnTargetId = useCallback((): string | null => {
++    if (currentVisit) return currentVisit.fromPetId;
++    const online = mutualFriends.find((f) => f.online);
++    return (online ?? mutualFriends[0])?.id ?? null;
++  }, [currentVisit, mutualFriends]);
++
++  spawnYarnRef.current = (s: YarnState) => setYarn({ id: Date.now(), initial: s });
++
++  const handleYarnExit = useCallback((side: "left" | "right", y: number, vx: number, vy: number) => {
++    const target = yarnTargetId();
++    if (!target) return false;
++    sendAction(target, { t: "yarn", side, y, vx, vy });
++    say(`Wuuusch! 🧶 Fliegt zu ${friendName(target)}!`, 3500);
++    return true;
++  }, [yarnTargetId, sendAction, say, friendName]);
++
++  // The cat chases a resting yarn ball and bats it around
++  useEffect(() => {
++    if (!yarn) return;
++    let chaseUntil = Date.now() + 25_000;
++    const id = setInterval(() => {
++      const ball = yarnRef.current;
++      if (!ball || dragging || feedingSnackRef.current) return;
++      if (stateRef.current !== "idle" && stateRef.current !== "walking") return;
++      if (Date.now() > chaseUntil) return;
++      const b = ball.get();
++      const p = positionRef.current;
++      const dx = b.x - p.x;
++      if (Math.abs(dx) < 45 && Math.abs(b.y - p.y) < 90) {
++        ball.kick((dx >= 0 ? 1 : -1) * (5 + Math.random() * 6), -(6 + Math.random() * 5));
++        chaseUntil = Date.now() + 25_000;
++        return;
++      }
++      if (ball.isResting()) {
++        const step = Math.max(-140, Math.min(140, dx));
++        setPetMoveMs(450);
++        setPosition({ x: p.x + step, y: Math.max(p.y, window.innerHeight - 90) });
++      }
++    }, 500);
++    return () => { clearInterval(id); setPetMoveMs(0); };
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [yarn?.id, dragging]);
++
++  // ---- Couple interactions (kiss / cuddle / play) ----
++  const coupleTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
++  const playCouple = useCallback((kind: "kiss" | "cuddle" | "play", fromName?: string) => {
++    coupleTimers.current.forEach(clearTimeout);
++    coupleTimers.current = [];
++    const v = visitorPos;
++    const emojis = kind === "kiss" ? ["💋", "💕", "💗", "💖"] : kind === "cuddle" ? ["🤗", "💞", "💤", "💕", "✨"] : ["🐾", "✨", "💨", "🐾"];
++    if (v) {
++      const p = positionRef.current;
++      const side = p.x <= v.x ? -1 : 1;
++      const gap = kind === "cuddle" ? 30 : 42;
++      setPetMoveMs(800);
++      setPosition({ x: v.x + side * gap, y: v.y });
++      coupleTimers.current.push(setTimeout(() => setPetMoveMs(0), 900));
++    }
++    coupleTimers.current.push(setTimeout(() => {
++      showPetEffect(emojis);
++      setVisitorEffect({ id: Date.now(), emojis: emojis.slice().reverse(), text: kind === "kiss" ? "mwah! 💋" : kind === "cuddle" ? "*kuschel*" : "fang mich!" });
++      if (kind === "cuddle") {
++        nap();
++        coupleTimers.current.push(setTimeout(() => { wake(); showPetEffect(["💕", "✨"]); }, 6000));
++      } else if (kind === "play") {
++        setPetExtraStyle({ animation: "feed-happy-bounce 500ms ease-in-out 4", transition: "none" });
++        coupleTimers.current.push(setTimeout(() => setPetExtraStyle({}), 2100));
++      } else {
++        setPetExtraStyle({ animation: "feed-happy-bounce 800ms ease-in-out 1", transition: "none" });
++        coupleTimers.current.push(setTimeout(() => setPetExtraStyle({}), 900));
++      }
++      if (fromName) {
++        const msg = kind === "kiss" ? `${fromName} gibt dir ein Küsschen 😘` : kind === "cuddle" ? `${fromName} will kuscheln 🤗💕` : `${fromName} will spielen! 🐾`;
++        say(msg, 6000);
++      }
++    }, v ? 850 : 0));
++  }, [visitorPos, setPosition, showPetEffect, nap, wake, say]);
++
++  const sendCouple = useCallback((kind: "kiss" | "cuddle" | "play") => {
++    if (!currentVisit) return;
++    sendAction(currentVisit.fromPetId, { t: kind });
++    playCouple(kind);
++  }, [currentVisit, sendAction, playCouple]);
++
++  // ---- Shared plant & countdown ----
++  const waterPlant = useCallback(() => {
++    const today = todayStr();
++    if (plant.waterMe === today) return;
++    const next: PlantState = { ...plant, points: plant.points + 1, waterMe: today, lastWater: Date.now() };
++    setPlant(next);
++    if (partner) sendAction(partner.id, { t: "water", points: next.points });
++    say(next.points % 7 === 0 ? "Unsere Blume wächst! 🌷" : "*plitsch platsch* 💧", 3500);
++  }, [plant, partner, sendAction, say]);
++
++  const setCountdown = useCallback((c: Countdown | null) => {
++    setCountdownState(c);
++    if (partner) sendAction(partner.id, { t: "countdown", date: c?.date ?? null, label: c?.label ?? "" });
++  }, [partner, sendAction]);
++
+   const handleThemeImport = useCallback(
+     (name: string, idle: string, walk: string, sleep: string) => {
+       addCustomTheme(name, idle, walk, sleep);
+@@ -537,6 +755,8 @@ export default function App() {
+         facingLeft={facingLeft}
+         theme={currentTheme}
+         extraStyle={petExtraStyle}
++        accessory={accessory}
++        moveMs={petMoveMs}
+         onClick={handlePetClick}
+         onDragStart={handleDragStart}
+         onDrag={handleDrag}
+@@ -600,6 +820,9 @@ export default function App() {
+           onDelete={removeCustomTheme}
+           onChangeShortcut={handleChangeShortcut}
+           onClearMemory={handleClearMemory}
++          accessory={accessory}
++          activeHours={activeTime.hours}
++          onSelectAccessory={setAccessory}
+           onClose={() => setSettingsOpen(false)}
+         />
+       )}
+@@ -740,11 +963,61 @@ export default function App() {
+           onFeed={(snack) => { feedFriend(currentVisit.fromPetId, snack); }}
+           onPet={() => { petFriend(currentVisit.fromPetId); }}
+           onSendImage={(file) => { sendImageTo(currentVisit.fromPetId, file); }}
++          onCouple={sendCouple}
++          remoteEffect={visitorEffect}
+           onPositionChange={setVisitorPos}
+           onOverlayChange={setVisitorOverlay}
+         />
+       )}
+ 
++      {unreadCount > 0 && !overlayOpen && (
++        <div
++          className="chat-badge"
++          style={{ left: position.x + 14, top: position.y - 56 }}
++          onClick={() => setMessagesOpen(true)}
++          title="Neue Nachrichten"
++        >
++          💌 {unreadCount}
++        </div>
++      )}
++
++      {messagesOpen && (
++        <ChatPanel
++          entries={chatLog}
++          friends={mutualFriends.map((f) => ({ id: f.id, name: f.name }))}
++          defaultFriendId={currentVisit?.fromPetId ?? partner?.id ?? null}
++          onSend={(fid, t) => {
++            sendVisit(fid, t);
++            addChat({ id: `me-${Date.now()}`, friendId: fid, friendName: friendName(fid), fromMe: true, text: t, ts: Date.now() });
++          }}
++          onSendImage={(fid, file) => { sendImageTo(fid, file); }}
++          onClose={() => { markChatRead(); setMessagesOpen(false); }}
++        />
++      )}
++
++      {yarn && (
++        <YarnBall
++          key={yarn.id}
++          ref={yarnRef}
++          initial={yarn.initial}
++          onExit={handleYarnExit}
++          onPosition={setYarnPos}
++          onDragChange={setYarnDragging}
++          onGone={() => { setYarn(null); setYarnPos(null); setYarnDragging(false); }}
++        />
++      )}
++
++      {partner && (
++        <CoupleCorner
++          partnerName={partnerName}
++          plant={plant}
++          countdown={countdown}
++          onWater={waterPlant}
++          onSetCountdown={setCountdown}
++          onEditingChange={setCornerEditing}
++        />
++      )}
++
+       {petEffect && (
+         <div className="pet-effect" key={petEffect.id} style={{ left: position.x - 40, top: position.y - 70 }}>
+           {petEffect.emojis.map((e, idx) => (
+diff --git a/src/components/AccessoryBadge.tsx b/src/components/AccessoryBadge.tsx
+new file mode 100644
+index 0000000..67fdd11
+--- /dev/null
++++ b/src/components/AccessoryBadge.tsx
+@@ -0,0 +1,19 @@
++import { accessoryById } from "../lib/look";
++
++/** Draws the accessory emoji on top of a 64×64 cat sprite box. */
++export default function AccessoryBadge({ id, flip }: { id?: string | null; flip?: boolean }) {
++  const acc = accessoryById(id);
++  if (!acc) return null;
++  return (
++    <span
++      className="pet-accessory"
++      style={{
++        top: -4 + (acc.dy ?? 0),
++        fontSize: acc.size ?? 18,
++        transform: `translateX(-50%) ${flip ? "scaleX(-1)" : ""}`,
++      }}
++    >
++      {acc.emoji}
++    </span>
++  );
++}
+diff --git a/src/components/ChatPanel.tsx b/src/components/ChatPanel.tsx
+new file mode 100644
+index 0000000..86fdfc8
+--- /dev/null
++++ b/src/components/ChatPanel.tsx
+@@ -0,0 +1,104 @@
++import { useEffect, useRef, useState } from "react";
++
++export interface ChatEntry {
++  id: string;
++  friendId: string;
++  friendName: string;
++  fromMe: boolean;
++  text?: string;
++  img?: string;
++  ts: number;
++}
++
++interface ChatPanelProps {
++  entries: ChatEntry[];
++  friends: { id: string; name: string }[];
++  defaultFriendId: string | null;
++  onSend: (friendId: string, text: string) => void;
++  onSendImage: (friendId: string, file?: File) => void;
++  onClose: () => void;
++}
++
++function fmt(ts: number) {
++  const d = new Date(ts);
++  const today = new Date();
++  const time = d.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
++  if (d.toDateString() === today.toDateString()) return time;
++  return `${d.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" })} ${time}`;
++}
++
++export default function ChatPanel({ entries, friends, defaultFriendId, onSend, onSendImage, onClose }: ChatPanelProps) {
++  const [friendId, setFriendId] = useState<string | null>(defaultFriendId ?? friends[0]?.id ?? null);
++  const [text, setText] = useState("");
++  const [zoom, setZoom] = useState<string | null>(null);
++  const listRef = useRef<HTMLDivElement>(null);
++  const shown = entries.filter((e) => !friendId || e.friendId === friendId);
++
++  useEffect(() => {
++    listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
++  }, [shown.length, friendId]);
++
++  const send = () => {
++    const t = text.trim();
++    if (!t || !friendId) return;
++    onSend(friendId, t);
++    setText("");
++  };
++
++  return (
++    <div className="chat-overlay" onClick={onClose}>
++      <div className="chat-panel" onClick={(e) => e.stopPropagation()}>
++        <div className="chat-header">
++          <span>💌 Nachrichten</span>
++          {friends.length > 1 && (
++            <select value={friendId ?? ""} onChange={(e) => setFriendId(e.target.value)}>
++              {friends.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
++            </select>
++          )}
++          <button className="chat-close" onClick={onClose}>×</button>
++        </div>
++        <div className="chat-list" ref={listRef}>
++          {shown.length === 0 && <div className="chat-empty">Noch keine Nachrichten 🐾</div>}
++          {shown.map((e) => (
++            <div key={e.id} className={`chat-msg ${e.fromMe ? "me" : "them"}`}>
++              <div className="chat-bubble">
++                {e.img && <img src={e.img} alt="" onClick={() => setZoom(e.img!)} />}
++                {e.text && <span>{e.text}</span>}
++              </div>
++              <div className="chat-meta">{e.fromMe ? "du" : e.friendName} · {fmt(e.ts)}</div>
++            </div>
++          ))}
++        </div>
++        {friendId ? (
++          <div className="chat-input-row">
++            <button className="chat-img-btn" title="Bild / Meme" onClick={() => onSendImage(friendId)}>🖼️</button>
++            <input
++              autoFocus
++              value={text}
++              maxLength={300}
++              placeholder="Schreib etwas Süßes… (Strg+V für Bilder)"
++              onChange={(e) => setText(e.target.value)}
++              onKeyDown={(e) => { if (e.key === "Enter") send(); if (e.key === "Escape") onClose(); }}
++              onPaste={(e) => {
++                const item = Array.from(e.clipboardData.items).find((i) => i.type.startsWith("image/"));
++                const file = item?.getAsFile();
++                if (file) {
++                  e.preventDefault();
++                  onSendImage(friendId, file);
++                }
++              }}
++            />
++            <button className="chat-send-btn" onClick={send}>➤</button>
++          </div>
++        ) : (
++          <div className="chat-empty">Füge zuerst einen Freund hinzu.</div>
++        )}
++        {zoom && (
++          <div className="chat-zoom" onClick={() => setZoom(null)}>
++            <img src={zoom} alt="" />
++          </div>
++        )}
++      </div>
++    </div>
++  );
++}
+diff --git a/src/components/CoupleCorner.tsx b/src/components/CoupleCorner.tsx
+new file mode 100644
+index 0000000..ad2c641
+--- /dev/null
++++ b/src/components/CoupleCorner.tsx
+@@ -0,0 +1,124 @@
++import { useState } from "react";
++
++export interface PlantState {
++  points: number;
++  waterMe?: string;   // YYYY-MM-DD
++  waterThem?: string; // YYYY-MM-DD
++  lastWater?: number; // timestamp
++}
++
++export interface Countdown {
++  date: string; // YYYY-MM-DD
++  label: string;
++}
++
++export const CORNER_W = 250;
++export const CORNER_H = 130;
++
++export function todayStr(d = new Date()): string {
++  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
++}
++
++function plantLook(points: number): { emoji: string; size: number; label: string } {
++  if (points >= 21) return { emoji: "💐", size: 40, label: "in voller Blüte!" };
++  if (points >= 14) return { emoji: "🌷", size: 38, label: "blüht" };
++  if (points >= 8) return { emoji: "🌷", size: 30, label: "Knospe" };
++  if (points >= 4) return { emoji: "🌿", size: 30, label: "wächst" };
++  if (points >= 1) return { emoji: "🌱", size: 26, label: "Keimling" };
++  return { emoji: "🟤", size: 12, label: "Samen – gieß mich!" };
++}
++
++function daysUntil(date: string): number {
++  const [y, m, d] = date.split("-").map(Number);
++  const target = new Date(y, m - 1, d).getTime();
++  const now = new Date();
++  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
++  return Math.round((target - today) / 86_400_000);
++}
++
++interface CoupleCornerProps {
++  partnerName: string;
++  plant: PlantState;
++  countdown: Countdown | null;
++  onWater: () => void;
++  onSetCountdown: (c: Countdown | null) => void;
++  onEditingChange: (editing: boolean) => void;
++}
++
++export default function CoupleCorner({ partnerName, plant, countdown, onWater, onSetCountdown, onEditingChange }: CoupleCornerProps) {
++  const [editing, setEditingState] = useState(false);
++  const [date, setDate] = useState(countdown?.date ?? "");
++  const [label, setLabel] = useState(countdown?.label ?? "");
++  const [splash, setSplash] = useState(0);
++
++  const setEditing = (v: boolean) => {
++    setEditingState(v);
++    onEditingChange(v);
++    if (v) {
++      setDate(countdown?.date ?? "");
++      setLabel(countdown?.label ?? "");
++    }
++  };
++
++  const today = todayStr();
++  const wilted = plant.points > 0 && plant.lastWater !== undefined && Date.now() - plant.lastWater > 3 * 86_400_000;
++  const look = plantLook(plant.points);
++  const meDone = plant.waterMe === today;
++  const themDone = plant.waterThem === today;
++
++  let cdText = "";
++  if (countdown) {
++    const d = daysUntil(countdown.date);
++    if (d > 1) cdText = `Noch ${d} Tage: ${countdown.label}`;
++    else if (d === 1) cdText = `Morgen: ${countdown.label}! 🥰`;
++    else if (d === 0) cdText = `Heute: ${countdown.label}! 🎉`;
++    else cdText = `${countdown.label} war vor ${-d} T.`;
++  }
++
++  return (
++    <div className="couple-corner" style={{ width: CORNER_W, height: CORNER_H }}>
++      <div
++        className={`couple-plant ${wilted ? "wilted" : ""}`}
++        onClick={() => {
++          if (meDone) return;
++          setSplash(Date.now());
++          onWater();
++        }}
++        title={meDone ? "Heute schon gegossen 💧" : "Klicken zum Gießen 💧"}
++      >
++        {splash > 0 && (
++          <div className="couple-water" key={splash}>
++            <span>💧</span><span>💧</span><span>💧</span>
++          </div>
++        )}
++        <div className="couple-plant-emoji" style={{ fontSize: look.size }}>{wilted ? "🥀" : look.emoji}</div>
++        <div className="couple-pot" />
++        <div className="couple-plant-info">
++          <span className={meDone ? "done" : ""}>💧 du</span>
++          <span className={themDone ? "done" : ""}>💧 {partnerName}</span>
++        </div>
++      </div>
++
++      <div className="couple-sign" onClick={() => !editing && setEditing(true)} title="Countdown einstellen">
++        {!editing && (countdown ? <span>📅 {cdText}</span> : <span className="couple-sign-empty">📅 Countdown setzen…</span>)}
++        {editing && (
++          <div className="couple-editor" onClick={(e) => e.stopPropagation()}>
++            <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
++            <input type="text" value={label} maxLength={40} placeholder="z.B. Wiedersehen 💕" onChange={(e) => setLabel(e.target.value)} />
++            <div className="couple-editor-row">
++              <button
++                onClick={() => {
++                  if (date) onSetCountdown({ date, label: label.trim() || "Wiedersehen 💕" });
++                  setEditing(false);
++                }}
++              >Speichern</button>
++              {countdown && <button onClick={() => { onSetCountdown(null); setEditing(false); }}>Löschen</button>}
++              <button onClick={() => setEditing(false)}>✕</button>
++            </div>
++          </div>
++        )}
++      </div>
++      <div className="couple-plant-label">{wilted ? "Durstig! 🥺" : look.label}</div>
++    </div>
++  );
++}
+diff --git a/src/components/MoreMenu.tsx b/src/components/MoreMenu.tsx
+index d835338..9c7238c 100644
+--- a/src/components/MoreMenu.tsx
++++ b/src/components/MoreMenu.tsx
+@@ -20,6 +20,7 @@ const CATEGORIES: Category[] = [
+       { action: "search", icon: "\uD83D\uDD0D", label: "Search" },
+       { action: "music", icon: "\uD83C\uDFB5", label: "Music" },
+       { action: "timer", icon: "\u23F1\uFE0F", label: "Timer" },
++      { action: "yarn", icon: "🧶", label: "Wolle" },
+     ],
+   },
+   {
+@@ -41,6 +42,7 @@ const CATEGORIES: Category[] = [
+   {
+     name: "Social",
+     items: [
++      { action: "messages", icon: "💌", label: "Nachrichten" },
+       { action: "friends", icon: "\uD83D\uDC3E", label: "Friends" },
+       { action: "settings", icon: "\u2699\uFE0F", label: "Style" },
+     ],
+diff --git a/src/components/Pet.tsx b/src/components/Pet.tsx
+index 2506881..e754baf 100644
+--- a/src/components/Pet.tsx
++++ b/src/components/Pet.tsx
+@@ -2,6 +2,7 @@ import { useRef, useCallback } from "react";
+ import { PetState } from "../hooks/usePetMovement";
+ import { SpriteTheme } from "../hooks/useTheme";
+ import "../styles/pet.css";
++import AccessoryBadge from "./AccessoryBadge";
+ 
+ interface PetProps {
+   x: number;
+@@ -10,6 +11,8 @@ interface PetProps {
+   facingLeft: boolean;
+   theme: SpriteTheme;
+   extraStyle?: React.CSSProperties;
++  accessory?: string | null;
++  moveMs?: number;
+   onClick: () => void;
+   onDragStart: () => void;
+   onDrag: (x: number, y: number) => void;
+@@ -41,7 +44,7 @@ function getAnimClass(state: PetState): string {
+ }
+ 
+ export default function Pet({
+-  x, y, state, facingLeft, theme, extraStyle,
++  x, y, state, facingLeft, theme, extraStyle, accessory, moveMs,
+   onClick, onDragStart, onDrag, onDragEnd,
+ }: PetProps) {
+   const animClass = getAnimClass(state);
+@@ -86,13 +89,14 @@ export default function Pet({
+   return (
+     <div
+       className={`pet-container ${isDragging.current ? "dragging" : ""}`}
+-      style={{ left: x - 32, top: y - 32, ...extraStyle }}
++      style={{ left: x - 32, top: y - 32, ...(moveMs ? { transition: `left ${moveMs}ms ease-in-out, top ${moveMs}ms ease-in-out` } : {}), ...extraStyle }}
+       onMouseDown={handleMouseDown}
+     >
+       <div
+         className={`pet-sprite ${animClass} ${facingLeft ? "flip" : ""}`}
+         style={{ backgroundImage: `url(${spriteUrl})` }}
+       />
++      {state !== "home" && <AccessoryBadge id={accessory} />}
+       {(state === "napping" || state === "home") && (
+         <div className="nap-zzz">z z z</div>
+       )}
+diff --git a/src/components/RadialMenu.tsx b/src/components/RadialMenu.tsx
+index f7c1299..321aa45 100644
+--- a/src/components/RadialMenu.tsx
++++ b/src/components/RadialMenu.tsx
+@@ -1,6 +1,6 @@
+ import "../styles/menu.css";
+ 
+-export type MenuAction = "chat" | "search" | "music" | "nap" | "home" | "settings" | "journal" | "achievements" | "friends" | "notes" | "feed" | "timer";
++export type MenuAction = "chat" | "search" | "music" | "nap" | "home" | "settings" | "journal" | "achievements" | "friends" | "notes" | "feed" | "timer" | "yarn" | "messages";
+ 
+ interface MenuItem {
+   action: MenuAction | "more";
+diff --git a/src/components/SettingsPanel.tsx b/src/components/SettingsPanel.tsx
+index 8d16937..b535bd9 100644
+--- a/src/components/SettingsPanel.tsx
++++ b/src/components/SettingsPanel.tsx
+@@ -1,3 +1,4 @@
++import { ACCESSORIES } from "../lib/look";
+ import { useRef, useState, useEffect } from "react";
+ import { invoke } from "@tauri-apps/api/core";
+ import {
+@@ -75,6 +76,9 @@ interface SettingsPanelProps {
+   onDelete: (id: string) => void;
+   onChangeShortcut: (s: string) => void;
+   onClearMemory: () => void;
++  accessory?: string | null;
++  activeHours?: number;
++  onSelectAccessory?: (id: string | null) => void;
+   onClose: () => void;
+ }
+ 
+@@ -89,6 +93,9 @@ export default function SettingsPanel({
+   onDelete,
+   onChangeShortcut,
+   onClearMemory,
++  accessory,
++  activeHours = 0,
++  onSelectAccessory,
+   onClose,
+ }: SettingsPanelProps) {
+   const idleInputRef = useRef<HTMLInputElement>(null);
+@@ -179,6 +186,32 @@ export default function SettingsPanel({
+           })}
+         </div>
+ 
++        {onSelectAccessory && (
++          <>
++            <div className="section-label">Accessoires · {activeHours.toFixed(1)} h aktiv</div>
++            <div className="accessory-grid">
++              <div className={`accessory-card ${!accessory ? "selected" : ""}`} onClick={() => onSelectAccessory(null)}>
++                <div className="accessory-emoji">🚫</div>
++                <div className="accessory-name">Keins</div>
++              </div>
++              {ACCESSORIES.map((acc) => {
++                const unlocked = activeHours >= acc.hours;
++                return (
++                  <div
++                    key={acc.id}
++                    className={`accessory-card ${accessory === acc.id ? "selected" : ""} ${unlocked ? "" : "locked"}`}
++                    onClick={() => unlocked && onSelectAccessory(acc.id)}
++                    title={unlocked ? acc.name : `Freischalten nach ${acc.hours} h`}
++                  >
++                    <div className="accessory-emoji">{unlocked ? acc.emoji : "🔒"}</div>
++                    <div className="accessory-name">{unlocked ? acc.name : `${acc.hours} h`}</div>
++                  </div>
++                );
++              })}
++            </div>
++          </>
++        )}
++
+         {customThemes.length > 0 && (
+           <>
+             <div className="section-label">Custom</div>
+diff --git a/src/components/VisitingPet.tsx b/src/components/VisitingPet.tsx
+index 57e5b3e..9f11dd9 100644
+--- a/src/components/VisitingPet.tsx
++++ b/src/components/VisitingPet.tsx
+@@ -2,6 +2,8 @@ import { useState, useEffect, useRef } from "react";
+ import { getSpritePaths, Breed, Color } from "../hooks/useTheme";
+ import { IncomingVisit } from "../hooks/useFriends";
+ import { SNACKS, Snack } from "./SnackPanel";
++import AccessoryBadge from "./AccessoryBadge";
++import { unpackColor } from "../lib/look";
+ 
+ interface VisitingPetProps {
+   visit: IncomingVisit;
+@@ -12,13 +14,15 @@ interface VisitingPetProps {
+   onFeed?: (snack: Snack) => void;
+   onPet?: () => void;
+   onSendImage?: (file?: File) => void;
++  onCouple?: (kind: "kiss" | "cuddle" | "play") => void;
++  remoteEffect?: { id: number; emojis: string[]; text?: string } | null;
+   onPositionChange?: (pos: { x: number; y: number } | null) => void;
+   onOverlayChange?: (open: boolean) => void;
+ }
+ 
+ type Phase = "enter" | "idle" | "exit" | "done";
+ 
+-export default function VisitingPet({ visit, userPetX, userPetY, onComplete, onChat, onFeed, onPet, onSendImage, onPositionChange, onOverlayChange }: VisitingPetProps) {
++export default function VisitingPet({ visit, userPetX, userPetY, onComplete, onChat, onFeed, onPet, onSendImage, onCouple, remoteEffect, onPositionChange, onOverlayChange }: VisitingPetProps) {
+   const [snackPickerOpen, setSnackPickerOpen] = useState(false);
+   const [effect, setEffect] = useState<{ id: number; emojis: string[]; text?: string } | null>(null);
+   const [bouncing, setBouncing] = useState(false);
+@@ -33,6 +37,10 @@ export default function VisitingPet({ visit, userPetX, userPetY, onComplete, onC
+     }, 2200);
+   };
+   useEffect(() => () => { if (effectTimerRef.current) clearTimeout(effectTimerRef.current); }, []);
++  useEffect(() => {
++    if (remoteEffect) showEffect(remoteEffect.emojis, remoteEffect.text);
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [remoteEffect?.id]);
+   const [phase, setPhase] = useState<Phase>("enter");
+   const [pos, setPos] = useState({ x: 0, y: 0 });
+   const [facingLeft, setFacingLeft] = useState(false);
+@@ -274,6 +282,13 @@ export default function VisitingPet({ visit, userPetX, userPetY, onComplete, onC
+                 🍣 Füttern
+               </button>
+             )}
++            {onCouple && (
++              <>
++                <button className="visitor-menu-btn" onClick={() => { setMenuOpen(false); onCouple("kiss"); }}>😘 Küsschen geben</button>
++                <button className="visitor-menu-btn" onClick={() => { setMenuOpen(false); onCouple("cuddle"); }}>🤗 Kuscheln</button>
++                <button className="visitor-menu-btn" onClick={() => { setMenuOpen(false); onCouple("play"); }}>🐾 Fangen spielen</button>
++              </>
++            )}
+             {onPet && (
+               <button
+                 className="visitor-menu-btn"
+@@ -374,6 +389,7 @@ export default function VisitingPet({ visit, userPetX, userPetY, onComplete, onC
+           onClick={handleSpriteClick}
+           title="Click to interact"
+         />
++        <AccessoryBadge id={unpackColor(visit.color).accessory} />
+         <div className="visiting-pet-nametag">{visit.fromName}</div>
+         {showMessage && visit.message && (
+           <div className="visiting-pet-message">{visit.message}</div>
+diff --git a/src/components/YarnBall.tsx b/src/components/YarnBall.tsx
+new file mode 100644
+index 0000000..b2b1f4e
+--- /dev/null
++++ b/src/components/YarnBall.tsx
+@@ -0,0 +1,156 @@
++import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
++
++export interface YarnState {
++  x: number;
++  y: number;
++  vx: number;
++  vy: number;
++}
++
++export interface YarnHandle {
++  kick: (vx: number, vy: number) => void;
++  get: () => YarnState;
++  isResting: () => boolean;
++}
++
++interface YarnBallProps {
++  initial: YarnState;
++  /** Called when the ball leaves the screen sideways. Return true if it was sent away (ball disappears). */
++  onExit: (side: "left" | "right", yFrac: number, vx: number, vy: number) => boolean;
++  onPosition: (pos: { x: number; y: number }) => void;
++  onDragChange: (dragging: boolean) => void;
++  onGone: () => void;
++}
++
++const R = 14;
++const GRAVITY = 0.45;
++const IDLE_TIMEOUT = 90_000;
++
++const YarnBall = forwardRef<YarnHandle, YarnBallProps>(function YarnBall(
++  { initial, onExit, onPosition, onDragChange, onGone },
++  ref,
++) {
++  const s = useRef<YarnState>({ ...initial });
++  const [draw, setDraw] = useState({ x: initial.x, y: initial.y, rot: 0 });
++  const dragging = useRef(false);
++  const lastMoves = useRef<{ x: number; y: number; t: number }[]>([]);
++  const rot = useRef(0);
++  const lastActivity = useRef(Date.now());
++  const cbs = useRef({ onExit, onPosition, onDragChange, onGone });
++  cbs.current = { onExit, onPosition, onDragChange, onGone };
++
++  useImperativeHandle(ref, () => ({
++    kick: (vx, vy) => {
++      s.current.vx = vx;
++      s.current.vy = vy;
++      lastActivity.current = Date.now();
++    },
++    get: () => ({ ...s.current }),
++    isResting: () => {
++      const floor = window.innerHeight - R - 6;
++      return !dragging.current && s.current.y >= floor - 1 && Math.abs(s.current.vx) < 0.3 && Math.abs(s.current.vy) < 1;
++    },
++  }));
++
++  useEffect(() => {
++    let raf = 0;
++    let lastReport = 0;
++    let gone = false;
++    const step = (t: number) => {
++      const b = s.current;
++      const w = window.innerWidth;
++      const floor = window.innerHeight - R - 6;
++      if (!dragging.current) {
++        b.vy += GRAVITY;
++        b.x += b.vx;
++        b.y += b.vy;
++        if (b.y > floor) {
++          b.y = floor;
++          b.vy = Math.abs(b.vy) > 1.5 ? -b.vy * 0.55 : 0;
++          b.vx *= 0.96;
++        }
++        if (b.y < R) {
++          b.y = R;
++          b.vy = Math.abs(b.vy) * 0.5;
++        }
++        if (b.x < -R || b.x > w + R) {
++          const side = b.x < 0 ? "left" : "right";
++          const sent = cbs.current.onExit(side, Math.max(0.05, Math.min(0.9, b.y / window.innerHeight)), b.vx, b.vy);
++          if (sent) {
++            gone = true;
++            cbs.current.onGone();
++            return;
++          }
++          // Nobody to send it to: bounce back
++          b.x = side === "left" ? R : w - R;
++          b.vx = -b.vx * 0.6;
++        }
++        if (Math.abs(b.vx) < 0.05) b.vx = 0;
++        rot.current += b.vx * 4;
++        if (Math.abs(b.vx) > 0.3 || Math.abs(b.vy) > 1) lastActivity.current = Date.now();
++      } else {
++        lastActivity.current = Date.now();
++      }
++
++      if (Date.now() - lastActivity.current > IDLE_TIMEOUT) {
++        gone = true;
++        cbs.current.onGone();
++        return;
++      }
++
++      setDraw({ x: b.x, y: b.y, rot: rot.current });
++      if (t - lastReport > 80) {
++        lastReport = t;
++        cbs.current.onPosition({ x: b.x, y: b.y });
++      }
++      raf = requestAnimationFrame(step);
++    };
++    raf = requestAnimationFrame(step);
++    return () => {
++      cancelAnimationFrame(raf);
++      if (!gone) cbs.current.onPosition({ x: -999, y: -999 });
++    };
++  }, []);
++
++  const onMouseDown = (e: React.MouseEvent) => {
++    e.preventDefault();
++    e.stopPropagation();
++    dragging.current = true;
++    cbs.current.onDragChange(true);
++    lastMoves.current = [{ x: e.clientX, y: e.clientY, t: performance.now() }];
++    const move = (ev: MouseEvent) => {
++      s.current.x = ev.clientX;
++      s.current.y = ev.clientY;
++      lastMoves.current.push({ x: ev.clientX, y: ev.clientY, t: performance.now() });
++      if (lastMoves.current.length > 6) lastMoves.current.shift();
++    };
++    const up = () => {
++      window.removeEventListener("mousemove", move);
++      window.removeEventListener("mouseup", up);
++      const m = lastMoves.current;
++      const a = m[0];
++      const b = m[m.length - 1];
++      const dt = Math.max(16, b.t - a.t);
++      // px per frame (~16ms)
++      s.current.vx = Math.max(-40, Math.min(40, ((b.x - a.x) / dt) * 16));
++      s.current.vy = Math.max(-40, Math.min(40, ((b.y - a.y) / dt) * 16));
++      dragging.current = false;
++      cbs.current.onDragChange(false);
++    };
++    window.addEventListener("mousemove", move);
++    window.addEventListener("mouseup", up);
++  };
++
++  return (
++    <div
++      className="yarn-ball"
++      style={{ left: draw.x - R, top: draw.y - R, width: R * 2, height: R * 2, transform: `rotate(${draw.rot}deg)` }}
++      onMouseDown={onMouseDown}
++      title="Werfen! Raus über den Rand → landet bei deinem Schatz"
++    >
++      🧶
++    </div>
++  );
++});
++
++export default YarnBall;
+diff --git a/src/hooks/useActiveTime.ts b/src/hooks/useActiveTime.ts
+new file mode 100644
+index 0000000..1487be7
+--- /dev/null
++++ b/src/hooks/useActiveTime.ts
+@@ -0,0 +1,36 @@
++import { useEffect, useRef, useState } from "react";
++import { ACCESSORIES, Accessory } from "../lib/look";
++
++const KEY = "active-minutes";
++
++function load(): number {
++  try {
++    return Number(localStorage.getItem(KEY) || "0") || 0;
++  } catch {
++    return 0;
++  }
++}
++
++/** Counts the minutes the app has been running; accessories unlock by hours. */
++export function useActiveTime(onUnlock?: (acc: Accessory) => void) {
++  const [minutes, setMinutes] = useState(load);
++  const onUnlockRef = useRef(onUnlock);
++  onUnlockRef.current = onUnlock;
++
++  useEffect(() => {
++    const id = setInterval(() => {
++      setMinutes((prev) => {
++        const next = prev + 1;
++        try { localStorage.setItem(KEY, String(next)); } catch { /* ignore */ }
++        const newly = ACCESSORIES.find((a) => a.hours * 60 === next);
++        if (newly) setTimeout(() => onUnlockRef.current?.(newly), 0);
++        return next;
++      });
++    }, 60_000);
++    return () => clearInterval(id);
++  }, []);
++
++  const hours = minutes / 60;
++  const isUnlocked = (acc: Accessory) => hours >= acc.hours;
++  return { minutes, hours, isUnlocked };
++}
+diff --git a/src/hooks/useFriends.ts b/src/hooks/useFriends.ts
+index 510d2a6..1d96a63 100644
+--- a/src/hooks/useFriends.ts
++++ b/src/hooks/useFriends.ts
+@@ -35,6 +35,7 @@ export function useFriends(
+   breed: string,
+   color: string,
+   onInteraction?: (interaction: IncomingInteraction) => void,
++  onMessage?: (m: { id: string; fromPetId: string; fromName: string; text: string; ts: number }) => void,
+ ) {
+   const [myPetId, setMyPetId] = useState<string | null>(() => localStorage.getItem("pet-id"));
+   const [myPetCode, setMyPetCode] = useState<string | null>(() => localStorage.getItem("pet-code"));
+@@ -60,6 +61,8 @@ export function useFriends(
+   currentVisitRef.current = currentVisit;
+   const onInteractionRef = useRef(onInteraction);
+   onInteractionRef.current = onInteraction;
++  const onMessageRef = useRef(onMessage);
++  onMessageRef.current = onMessage;
+ 
+   // Check Supabase connection
+   useEffect(() => {
+@@ -352,6 +355,16 @@ export function useFriends(
+         return;
+       }
+ 
++      if (visit.message) {
++        onMessageRef.current?.({
++          id: visit.id,
++          fromPetId: visit.from_pet_id,
++          fromName: visit.name,
++          text: visit.message,
++          ts: new Date(visit.created_at).getTime() || Date.now(),
++        });
++      }
++
+       const current = currentVisitRef.current;
+       if (current && current.fromPetId === visit.from_pet_id) {
+         // Same pet is already visiting — show their message as a chat bubble
+diff --git a/src/hooks/useTheme.ts b/src/hooks/useTheme.ts
+index 7613041..1bf0875 100644
+--- a/src/hooks/useTheme.ts
++++ b/src/hooks/useTheme.ts
+@@ -50,7 +50,8 @@ function resolveSprite(relativePath: string): string {
+   return spriteAssets[`../assets/sprites/${relativePath}`] ?? "";
+ }
+ 
+-export function getSpritePaths(breed: Breed, color: Color): { idle: string; walk: string; sleep: string } {
++export function getSpritePaths(breed: Breed, colorIn: Color): { idle: string; walk: string; sleep: string } {
++  const color = String(colorIn).split("+")[0] as Color;
+   const prefix = breed === "normal" ? color : `breeds/${breed}/${color}`;
+   const idle = resolveSprite(`${prefix}/idle.png`);
+   // Unknown breed/color (e.g. a friend on a newer version) → fall back to orange
+diff --git a/src/lib/actions.ts b/src/lib/actions.ts
+index 779354b..e880c05 100644
+--- a/src/lib/actions.ts
++++ b/src/lib/actions.ts
+@@ -6,7 +6,15 @@ export const ACTION_PREFIX = "\u0001PET:";
+ export type PetAction =
+   | { t: "feed"; snack: string }
+   | { t: "pet" }
+-  | { t: "img"; src: string; caption?: string };
++  | { t: "img"; src: string; caption?: string }
++  | { t: "kiss" }
++  | { t: "cuddle" }
++  | { t: "play" }
++  | { t: "yarn"; side: "left" | "right"; y: number; vx: number; vy: number }
++  | { t: "water"; points: number }
++  | { t: "countdown"; date: string | null; label: string };
++
++const ACTION_TYPES = ["feed", "pet", "img", "kiss", "cuddle", "play", "yarn", "water", "countdown"];
+ 
+ export function encodeAction(action: PetAction): string {
+   return ACTION_PREFIX + JSON.stringify(action);
+@@ -16,7 +24,7 @@ export function decodeAction(message: string): PetAction | null {
+   if (!message || !message.startsWith(ACTION_PREFIX)) return null;
+   try {
+     const a = JSON.parse(message.slice(ACTION_PREFIX.length));
+-    if (a && (a.t === "feed" || a.t === "pet" || a.t === "img")) return a as PetAction;
++    if (a && ACTION_TYPES.includes(a.t)) return a as PetAction;
+   } catch {
+     /* ignore malformed */
+   }
+diff --git a/src/lib/look.ts b/src/lib/look.ts
+new file mode 100644
+index 0000000..76edb46
+--- /dev/null
++++ b/src/lib/look.ts
+@@ -0,0 +1,41 @@
++// Accessories the cat can wear. They unlock after a number of hours the app was running.
++// The chosen accessory travels to friends packed into the color field: "pink+crown".
++
++export interface Accessory {
++  id: string;
++  emoji: string;
++  name: string;
++  hours: number;
++  /** Fine-tuning of the vertical position (px, 64px sprite box). */
++  dy?: number;
++  size?: number;
++}
++
++export const ACCESSORIES: Accessory[] = [
++  { id: "bow", emoji: "🎀", name: "Schleife", hours: 1 },
++  { id: "flower", emoji: "🌸", name: "Blüte", hours: 2 },
++  { id: "heart", emoji: "💗", name: "Herzchen", hours: 4 },
++  { id: "cap", emoji: "🧢", name: "Cap", hours: 6, dy: -2 },
++  { id: "tophat", emoji: "🎩", name: "Zylinder", hours: 9, dy: -6 },
++  { id: "glasses", emoji: "🕶️", name: "Sonnenbrille", hours: 12, dy: 10, size: 16 },
++  { id: "tiara", emoji: "👑", name: "Krone", hours: 18, dy: -4 },
++  { id: "party", emoji: "🥳", name: "Partyhut", hours: 25, dy: -4 },
++  { id: "halo", emoji: "😇", name: "Heiligenschein", hours: 35, dy: -10 },
++  { id: "star", emoji: "🌟", name: "Sternchen", hours: 50, dy: -6 },
++  { id: "rainbow", emoji: "🌈", name: "Regenbogen", hours: 75, dy: -12, size: 22 },
++  { id: "unicorn", emoji: "🦄", name: "Einhorn", hours: 100, dy: -8 },
++];
++
++export function accessoryById(id?: string | null): Accessory | undefined {
++  if (!id) return undefined;
++  return ACCESSORIES.find((a) => a.id === id);
++}
++
++export function packColor(color: string, accessory?: string | null): string {
++  return accessory ? `${color}+${accessory}` : color;
++}
++
++export function unpackColor(packed: string): { color: string; accessory?: string } {
++  const [color, accessory] = (packed || "").split("+");
++  return { color, accessory: accessory || undefined };
++}
+diff --git a/src/styles/friends.css b/src/styles/friends.css
+index e53bc5d..b866daa 100644
+--- a/src/styles/friends.css
++++ b/src/styles/friends.css
+@@ -729,3 +729,328 @@
+   align-self: center;
+   margin-left: 4px;
+ }
++
++/* Accessory on cats */
++.pet-accessory {
++  position: absolute;
++  left: 50%;
++  line-height: 1;
++  pointer-events: none;
++  z-index: 2;
++  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.25));
++}
++
++.accessory-grid {
++  display: grid;
++  grid-template-columns: repeat(5, 1fr);
++  gap: 8px;
++  margin-bottom: 16px;
++}
++
++.accessory-card {
++  border: 2px solid #ddd;
++  border-radius: 10px;
++  padding: 6px 2px;
++  text-align: center;
++  cursor: pointer;
++  background: white;
++  transition: all 0.15s ease;
++}
++
++.accessory-card:hover { border-color: #e8a33c; }
++.accessory-card.selected { border-color: #e8a33c; background: #fff8f0; }
++.accessory-card.locked { opacity: 0.45; cursor: default; }
++.accessory-emoji { font-size: 22px; line-height: 1.2; }
++.accessory-name { font-size: 10px; color: #666; font-family: 'Helvetica Neue', sans-serif; }
++
++/* Yarn ball */
++.yarn-ball {
++  position: absolute;
++  z-index: 1002;
++  pointer-events: auto;
++  cursor: grab;
++  font-size: 26px;
++  line-height: 28px;
++  text-align: center;
++  user-select: none;
++  filter: drop-shadow(0 2px 2px rgba(0, 0, 0, 0.25));
++}
++
++/* Couple corner: shared plant + countdown */
++.couple-corner {
++  position: absolute;
++  left: 16px;
++  bottom: 16px;
++  z-index: 990;
++  pointer-events: none;
++  display: flex;
++  align-items: flex-end;
++  gap: 10px;
++  font-family: 'Comic Sans MS', 'Chalkboard SE', cursive;
++}
++
++.couple-plant {
++  position: relative;
++  pointer-events: auto;
++  cursor: pointer;
++  width: 74px;
++  display: flex;
++  flex-direction: column;
++  align-items: center;
++}
++
++.couple-plant.wilted .couple-plant-emoji { filter: grayscale(0.6); }
++
++.couple-plant-emoji {
++  line-height: 1;
++  transform-origin: bottom center;
++  animation: couple-sway 3s ease-in-out infinite;
++  margin-bottom: -4px;
++}
++
++.couple-pot {
++  width: 40px;
++  height: 26px;
++  background: linear-gradient(#d9774a, #b85a33);
++  clip-path: polygon(0 0, 100% 0, 85% 100%, 15% 100%);
++  border-top: 5px solid #8f4424;
++}
++
++.couple-plant-info {
++  display: flex;
++  gap: 4px;
++  font-size: 9px;
++  margin-top: 3px;
++  background: rgba(255, 255, 255, 0.9);
++  border-radius: 8px;
++  padding: 1px 5px;
++  white-space: nowrap;
++}
++
++.couple-plant-info span { opacity: 0.35; }
++.couple-plant-info span.done { opacity: 1; color: #2a7bd4; font-weight: 700; }
++
++.couple-plant-label {
++  position: absolute;
++  left: 0;
++  width: 74px;
++  bottom: -14px;
++  text-align: center;
++  font-size: 9px;
++  color: #fff;
++  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7);
++  pointer-events: none;
++}
++
++.couple-water {
++  position: absolute;
++  top: -10px;
++  left: 50%;
++  transform: translateX(-50%);
++  display: flex;
++  gap: 4px;
++  pointer-events: none;
++}
++
++.couple-water span {
++  font-size: 14px;
++  animation: couple-drop 0.9s ease-in forwards;
++  opacity: 0;
++}
++
++.couple-water span:nth-child(2) { animation-delay: 0.15s; }
++.couple-water span:nth-child(3) { animation-delay: 0.3s; }
++
++.couple-sign {
++  pointer-events: auto;
++  cursor: pointer;
++  background: #f6e3c3;
++  border: 3px solid #a8743f;
++  border-radius: 8px;
++  padding: 6px 10px;
++  font-size: 12px;
++  color: #5b3a1a;
++  max-width: 160px;
++  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.25);
++  margin-bottom: 30px;
++}
++
++.couple-sign-empty { opacity: 0.7; }
++
++.couple-editor {
++  display: flex;
++  flex-direction: column;
++  gap: 4px;
++  cursor: default;
++}
++
++.couple-editor input {
++  font-family: inherit;
++  font-size: 11px;
++  border: 1px solid #a8743f;
++  border-radius: 6px;
++  padding: 3px 5px;
++  background: #fffaf2;
++}
++
++.couple-editor-row { display: flex; gap: 4px; }
++
++.couple-editor-row button {
++  flex: 1;
++  font-family: inherit;
++  font-size: 10px;
++  border: none;
++  border-radius: 6px;
++  background: #e8a33c;
++  color: white;
++  padding: 3px 4px;
++  cursor: pointer;
++}
++
++@keyframes couple-sway {
++  0%, 100% { transform: rotate(-3deg); }
++  50% { transform: rotate(3deg); }
++}
++
++@keyframes couple-drop {
++  0% { opacity: 0; transform: translateY(-10px); }
++  30% { opacity: 1; }
++  100% { opacity: 0; transform: translateY(26px); }
++}
++
++/* Unread badge + chat history */
++.chat-badge {
++  position: absolute;
++  z-index: 1003;
++  pointer-events: auto;
++  cursor: pointer;
++  background: #ff6f9c;
++  color: white;
++  font-family: 'Comic Sans MS', 'Chalkboard SE', cursive;
++  font-size: 12px;
++  font-weight: 700;
++  padding: 3px 8px;
++  border-radius: 12px;
++  box-shadow: 0 3px 10px rgba(255, 111, 156, 0.5);
++  animation: chat-badge-pulse 1.4s ease-in-out infinite;
++  white-space: nowrap;
++}
++
++@keyframes chat-badge-pulse {
++  0%, 100% { transform: scale(1); }
++  50% { transform: scale(1.12); }
++}
++
++.chat-overlay {
++  position: fixed;
++  inset: 0;
++  display: flex;
++  align-items: center;
++  justify-content: center;
++  pointer-events: auto;
++  z-index: 2000;
++  background: rgba(0, 0, 0, 0.3);
++  animation: friends-fade-in 0.2s ease-out;
++}
++
++.chat-panel {
++  position: relative;
++  width: 380px;
++  height: 520px;
++  background: #fff7fa;
++  border: 2px solid #f3c1d3;
++  border-radius: 16px;
++  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
++  display: flex;
++  flex-direction: column;
++  overflow: hidden;
++  font-family: 'Comic Sans MS', 'Chalkboard SE', cursive;
++}
++
++.chat-header {
++  display: flex;
++  align-items: center;
++  gap: 8px;
++  padding: 10px 14px;
++  background: #ffe3ee;
++  font-weight: 700;
++  color: #b0456f;
++}
++
++.chat-header span { flex: 1; }
++.chat-header select { font-family: inherit; border-radius: 6px; border: 1px solid #f3c1d3; }
++.chat-close { border: none; background: transparent; font-size: 20px; cursor: pointer; color: #b0456f; }
++
++.chat-list {
++  flex: 1;
++  overflow-y: auto;
++  padding: 12px;
++  display: flex;
++  flex-direction: column;
++  gap: 8px;
++}
++
++.chat-empty { text-align: center; color: #b99; font-size: 12px; padding: 20px; }
++
++.chat-msg { display: flex; flex-direction: column; max-width: 78%; }
++.chat-msg.me { align-self: flex-end; align-items: flex-end; }
++.chat-msg.them { align-self: flex-start; align-items: flex-start; }
++
++.chat-bubble {
++  padding: 7px 11px;
++  border-radius: 14px;
++  font-size: 13px;
++  line-height: 1.35;
++  overflow-wrap: anywhere;
++  display: flex;
++  flex-direction: column;
++  gap: 4px;
++}
++
++.chat-msg.me .chat-bubble { background: #ff8fb5; color: white; border-bottom-right-radius: 4px; }
++.chat-msg.them .chat-bubble { background: white; color: #333; border: 1px solid #f3c1d3; border-bottom-left-radius: 4px; }
++.chat-bubble img { max-width: 220px; max-height: 200px; border-radius: 8px; cursor: zoom-in; }
++.chat-meta { font-size: 9px; color: #b99; margin-top: 2px; }
++
++.chat-input-row {
++  display: flex;
++  gap: 6px;
++  padding: 10px;
++  border-top: 1px solid #f3c1d3;
++  background: white;
++}
++
++.chat-input-row input {
++  flex: 1;
++  font-family: inherit;
++  font-size: 13px;
++  border: 2px solid #f3c1d3;
++  border-radius: 10px;
++  padding: 6px 10px;
++  outline: none;
++}
++
++.chat-input-row input:focus { border-color: #ff8fb5; }
++
++.chat-img-btn, .chat-send-btn {
++  border: none;
++  border-radius: 10px;
++  background: #ffe3ee;
++  cursor: pointer;
++  font-size: 16px;
++  width: 36px;
++}
++
++.chat-send-btn { background: #ff8fb5; color: white; }
++
++.chat-zoom {
++  position: absolute;
++  inset: 0;
++  background: rgba(0, 0, 0, 0.8);
++  display: flex;
++  align-items: center;
++  justify-content: center;
++  cursor: zoom-out;
++}
++
++.chat-zoom img { max-width: 95%; max-height: 95%; border-radius: 8px; }

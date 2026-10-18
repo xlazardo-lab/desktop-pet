@@ -1,0 +1,1190 @@
+diff --git a/src-tauri/Cargo.toml b/src-tauri/Cargo.toml
+index 50726a4..eb4df47 100644
+--- a/src-tauri/Cargo.toml
++++ b/src-tauri/Cargo.toml
+@@ -21,7 +21,9 @@ reqwest = { version = "0.12", features = ["json"] }
+ chrono = "0.4"
+ active-win-pos-rs = "0.8"
+ tokio = { version = "1", features = ["full"] }
+-core-graphics = "0.24"
+ dotenvy = "0.15"
+ tauri-plugin-global-shortcut = "2"
+ regex = "1"
++
++[target.'cfg(target_os = "macos")'.dependencies]
++core-graphics = "0.24"
+diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
+index a4bd020..7abe7d9 100644
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -88,6 +88,7 @@ struct MousePosition {
+     y: f64,
+ }
+ 
++#[cfg(target_os = "macos")]
+ #[tauri::command]
+ fn get_mouse_position() -> Result<MousePosition, String> {
+     // Use the CoreGraphics C API directly to avoid leaking CGEvent/CGEventSource
+@@ -119,3 +120,12 @@ fn get_mouse_position() -> Result<MousePosition, String> {
+         })
+     }
+ }
++
++#[cfg(not(target_os = "macos"))]
++#[tauri::command]
++fn get_mouse_position(window: tauri::WebviewWindow) -> Result<MousePosition, String> {
++    let cursor = window.cursor_position().map_err(|e| e.to_string())?;
++    let origin = window.outer_position().map_err(|e| e.to_string())?;
++    let scale = window.scale_factor().map_err(|e| e.to_string())?;
++    Ok(MousePosition { x: (cursor.x - origin.x as f64) / scale, y: (cursor.y - origin.y as f64) / scale })
++}
+diff --git a/src-tauri/tauri.conf.json b/src-tauri/tauri.conf.json
+index 6febcda..8ce3271 100644
+--- a/src-tauri/tauri.conf.json
++++ b/src-tauri/tauri.conf.json
+@@ -26,7 +26,8 @@
+         "skipTaskbar": true,
+         "visible": false,
+         "shadow": false,
+-        "visibleOnAllWorkspaces": true
++        "visibleOnAllWorkspaces": true,
++        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows"
+       }
+     ],
+     "security": {
+diff --git a/src/App.tsx b/src/App.tsx
+index f9d8b92..4a455e7 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -11,10 +11,13 @@ import AchievementsPanel from "./components/AchievementsPanel";
+ import AchievementToast from "./components/AchievementToast";
+ import FriendsPanel from "./components/FriendsPanel";
+ import VisitingPet from "./components/VisitingPet";
++import ImageCard, { ReceivedImage, imageCardCenter, IMAGE_CARD_W, IMAGE_CARD_H } from "./components/ImageCard";
++import { imageFileToDataUrl, pickImageFile } from "./lib/actions";
++import type { IncomingInteraction } from "./hooks/useFriends";
+ import StickyNoteComponent from "./components/StickyNote";
+ import NotesPanel from "./components/NotesPanel";
+ import MoreMenu from "./components/MoreMenu";
+-import SnackPanel, { Snack } from "./components/SnackPanel";
++import SnackPanel, { Snack, SNACKS } from "./components/SnackPanel";
+ import FeedAnimation from "./components/FeedAnimation";
+ import TimerPanel from "./components/TimerPanel";
+ import TimerBubble from "./components/TimerBubble";
+@@ -49,7 +52,7 @@ export default function App() {
+       generate("chat", `timer finished: ${timerLabel}`);
+     },
+   });
+-  const { text, visible, hiding, loading, generate, dismiss } = useDialogue(
++  const { text, visible, hiding, loading, generate, dismiss, say } = useDialogue(
+     appName,
+     windowTitle,
+     appChanged,
+@@ -75,10 +78,11 @@ export default function App() {
+   const { data: eventData, trackEvent } = useEventTracker();
+   const { achievements, unlocked, newlyUnlocked, dismissToast, manualUnlock } = useAchievements(eventData);
+   const { entries, generateToday, todayGenerated, loading: journalLoading } = useJournal(eventData);
++  const interactionHandlerRef = useRef<(i: IncomingInteraction) => void>();
+   const {
+     myPetCode, myPetName, registered, registering, friends, loadingFriends, connected,
+-    register: registerPet, addFriend, acceptFriend, removeFriend, sendVisit, startHangout, setMyPetName, currentVisit, dismissVisit,
+-  } = useFriends(breed, color);
++    register: registerPet, addFriend, acceptFriend, removeFriend, sendVisit, sendAction, startHangout, setMyPetName, currentVisit, dismissVisit,
++  } = useFriends(breed, color, (i) => interactionHandlerRef.current?.(i));
+ 
+   const [shortcut, setShortcut] = useState(() =>
+     localStorage.getItem("chat-shortcut") || DEFAULT_SHORTCUT
+@@ -103,6 +107,10 @@ export default function App() {
+   const [petExtraStyle, setPetExtraStyle] = useState<React.CSSProperties>({});
+   const [visitorPos, setVisitorPos] = useState<{ x: number; y: number } | null>(null);
+   const [visitorOverlay, setVisitorOverlay] = useState(false);
++  const [receivedImages, setReceivedImages] = useState<ReceivedImage[]>([]);
++  const [petEffect, setPetEffect] = useState<{ id: number; emojis: string[] } | null>(null);
++  const feedFromRef = useRef<string | null>(null);
++  const feedingSnackRef = useRef(false);
+   const [notePositions, setNotePositions] = useState<Map<string, { x: number; y: number }>>(new Map());
+ 
+   const positionRef = useRef(position);
+@@ -131,6 +139,7 @@ export default function App() {
+     }) : []),
+     ...(timer.running ? [{ x: position.x - 50, y: position.y - 60, w: 80, h: 30 }] : []),
+     { x: position.x - 26, y: position.y + 33, w: 52, h: 6 },
++    ...(receivedImages.length > 0 ? [{ ...imageCardCenter(position.x, position.y), w: IMAGE_CARD_W + 10, h: IMAGE_CARD_H + 10 }] : []),
+   ];
+ 
+   useCursorPassthrough({
+@@ -367,6 +376,7 @@ export default function App() {
+           const dist = Math.hypot(me.clientX - pet.x, me.clientY - pet.y);
+           if (dist < 60) {
+             // Drop on pet — skip fly, go straight to chomp
++            feedingSnackRef.current = true;
+             setFeedingSnack({ snack, startX: me.clientX, startY: me.clientY, skipFly: true });
+             trackEvent("feed", snack.id);
+             setState("talking");
+@@ -376,6 +386,7 @@ export default function App() {
+         } else {
+           // Click without dragging — fallback to old fly animation
+           setFeedOpen(false);
++          feedingSnackRef.current = true;
+           setFeedingSnack({ snack, startX, startY });
+           trackEvent("feed", snack.id);
+           setState("talking");
+@@ -391,13 +402,84 @@ export default function App() {
+   const handleFeedComplete = useCallback(
+     (snackName: string) => {
+       setFeedingSnack(null);
++      feedingSnackRef.current = false;
+       setPetExtraStyle({});
+-      hunger.feed(25);
+-      generate("feed", `cat was fed ${snackName}`);
++      hunger.feed(40);
++      const from = feedFromRef.current;
++      feedFromRef.current = null;
++      if (from) {
++        say(`${from} hat mich mit ${snackName} gefüttert! 😻`, 6000);
++      } else {
++        generate("feed", `cat was fed ${snackName}`);
++      }
+       setTimeout(() => setState("idle"), 3000);
+     },
+-    [generate, setState, hunger],
++    [generate, say, setState, hunger],
++  );
++
++  // ---- Interactions with friends ----
++  const showPetEffect = useCallback((emojis: string[]) => {
++    const id = Date.now();
++    setPetEffect({ id, emojis });
++    setTimeout(() => setPetEffect((cur) => (cur && cur.id === id ? null : cur)), 2000);
++  }, []);
++
++  interactionHandlerRef.current = (i: IncomingInteraction) => {
++    const a = i.action;
++    if (a.t === "feed") {
++      const snack = SNACKS.find((sn) => sn.id === a.snack) ?? SNACKS[0];
++      if (!feedingSnackRef.current) {
++        feedingSnackRef.current = true;
++        feedFromRef.current = i.fromName;
++        const fromLeft = Math.random() < 0.5;
++        setFeedingSnack({ snack, startX: fromLeft ? 0 : window.innerWidth, startY: Math.max(0, position.y - 200) });
++        setState("talking");
++      } else {
++        hunger.feed(40);
++        say(`${i.fromName} hat mich mit ${snack.name} gefüttert! 😻`, 6000);
++      }
++    } else if (a.t === "pet") {
++      showPetEffect(["❤️", "💕", "💖", "✨"]);
++      if (!feedingSnackRef.current) {
++        setPetExtraStyle({ animation: "feed-happy-bounce 800ms ease-in-out 2", transition: "none" });
++        setTimeout(() => { if (!feedingSnackRef.current) setPetExtraStyle({}); }, 1700);
++      }
++      say(`${i.fromName} streichelt mich ❤️ *schnurr*`, 5000);
++    } else if (a.t === "img") {
++      setReceivedImages((prev) => [...prev, { id: i.id, fromName: i.fromName, src: a.src, caption: a.caption }]);
++    }
++  };
++
++  const friendName = useCallback(
++    (id: string) => friends.find((f) => f.id === id)?.name ?? currentVisit?.fromName ?? "Freund",
++    [friends, currentVisit],
++  );
++
++  const sendImageTo = useCallback(
++    async (friendId: string, file?: File): Promise<boolean> => {
++      try {
++        const chosen = file ?? (await pickImageFile());
++        if (!chosen) return false;
++        const src = await imageFileToDataUrl(chosen);
++        const ok = await sendAction(friendId, { t: "img", src });
++        say(ok ? `Bild an ${friendName(friendId)} geschickt! 📨` : "Hmm, das Bild ging nicht raus 😿", 4000);
++        return ok;
++      } catch (err) {
++        console.error(err);
++        say("Hmm, das Bild ging nicht raus 😿", 4000);
++        return false;
++      }
++    },
++    [sendAction, say, friendName],
++  );
++
++  const feedFriend = useCallback(
++    (friendId: string, snack: Snack) => sendAction(friendId, { t: "feed", snack: snack.id }),
++    [sendAction],
+   );
++  const petFriend = useCallback((friendId: string) => sendAction(friendId, { t: "pet" }), [sendAction]);
++
++  const closeImage = useCallback(() => setReceivedImages((prev) => prev.slice(1)), []);
+ 
+   const handleThemeImport = useCallback(
+     (name: string, idle: string, walk: string, sleep: string) => {
+@@ -527,6 +609,9 @@ export default function App() {
+           onAcceptFriend={acceptFriend}
+           onRemoveFriend={removeFriend}
+           onHangout={startHangout}
++          onFeedFriend={feedFriend}
++          onPetFriend={petFriend}
++          onSendImageFriend={(id) => sendImageTo(id)}
+           onClose={() => setFriendsOpen(false)}
+         />
+       )}
+@@ -621,11 +706,35 @@ export default function App() {
+           userPetY={position.y}
+           onComplete={dismissVisit}
+           onChat={handleVisitorChat}
++          onFeed={(snack) => { feedFriend(currentVisit.fromPetId, snack); }}
++          onPet={() => { petFriend(currentVisit.fromPetId); }}
++          onSendImage={(file) => { sendImageTo(currentVisit.fromPetId, file); }}
+           onPositionChange={setVisitorPos}
+           onOverlayChange={setVisitorOverlay}
+         />
+       )}
+ 
++      {petEffect && (
++        <div className="pet-effect" key={petEffect.id} style={{ left: position.x - 40, top: position.y - 70 }}>
++          {petEffect.emojis.map((e, idx) => (
++            <span key={idx} style={{ left: idx * 20, animationDelay: `${idx * 0.15}s` }}>{e}</span>
++          ))}
++        </div>
++      )}
++
++      {receivedImages.length > 0 && (() => {
++        const c = imageCardCenter(position.x, position.y);
++        return (
++          <ImageCard
++            image={receivedImages[0]}
++            x={c.x}
++            y={c.y}
++            queued={receivedImages.length - 1}
++            onClose={closeImage}
++          />
++        );
++      })()}
++
+       {newlyUnlocked.length > 0 && (
+         <AchievementToast
+           unlock={newlyUnlocked[0]}
+diff --git a/src/components/FriendsPanel.tsx b/src/components/FriendsPanel.tsx
+index 160a8b5..360533c 100644
+--- a/src/components/FriendsPanel.tsx
++++ b/src/components/FriendsPanel.tsx
+@@ -1,3 +1,4 @@
++import { SNACKS, Snack } from "./SnackPanel";
+ import { useState, useCallback } from "react";
+ import { getSpritePaths, Breed, Color } from "../hooks/useTheme";
+ import { Friend } from "../hooks/useFriends";
+@@ -17,6 +18,9 @@ interface FriendsPanelProps {
+   onAcceptFriend: (id: string) => void;
+   onRemoveFriend: (id: string) => void;
+   onHangout: (id: string) => void;
++  onFeedFriend?: (id: string, snack: Snack) => Promise<boolean>;
++  onPetFriend?: (id: string) => Promise<boolean>;
++  onSendImageFriend?: (id: string) => Promise<boolean>;
+   onClose: () => void;
+ }
+ 
+@@ -34,12 +38,23 @@ export default function FriendsPanel({
+   onAcceptFriend,
+   onRemoveFriend,
+   onHangout,
++  onFeedFriend,
++  onPetFriend,
++  onSendImageFriend,
+   onClose,
+ }: FriendsPanelProps) {
+   const [addCode, setAddCode] = useState("");
+   const [addMessage, setAddMessage] = useState<{ text: string; type: "error" | "success" } | null>(null);
+   const [adding, setAdding] = useState(false);
+   const [copied, setCopied] = useState(false);
++  const [snackFor, setSnackFor] = useState<string | null>(null);
++  const [sentInfo, setSentInfo] = useState<{ id: string; text: string } | null>(null);
++  const flashSent = async (id: string, p: Promise<boolean> | undefined, text: string) => {
++    if (!p) return;
++    const ok = await p;
++    setSentInfo({ id, text: ok ? text : "Fehler beim Senden" });
++    setTimeout(() => setSentInfo((cur) => (cur && cur.id === id ? null : cur)), 2500);
++  };
+   const [editingName, setEditingName] = useState(myPetName);
+ 
+   const handleCopy = useCallback(() => {
+@@ -193,6 +208,37 @@ export default function FriendsPanel({
+                         {friend.status === "pending_incoming" && <span className="friend-pending incoming">Request</span>}
+                       </div>
+                       <div className="friend-code">{friend.pet_code}</div>
++                      {friend.status === "mutual" && (
++                        <div className="friend-quick-row">
++                          {onFeedFriend && (
++                            <button className="friend-quick-btn" title="Katze füttern" onClick={() => setSnackFor(snackFor === friend.id ? null : friend.id)}>🍣</button>
++                          )}
++                          {onPetFriend && (
++                            <button className="friend-quick-btn" title="Streicheln" onClick={() => flashSent(friend.id, onPetFriend(friend.id), "❤️ gesendet")}>❤️</button>
++                          )}
++                          {onSendImageFriend && (
++                            <button className="friend-quick-btn" title="Bild / Meme senden" onClick={() => flashSent(friend.id, onSendImageFriend(friend.id), "🖼️ gesendet")}>🖼️</button>
++                          )}
++                          {sentInfo?.id === friend.id && <span className="friend-quick-status">{sentInfo.text}</span>}
++                        </div>
++                      )}
++                      {snackFor === friend.id && onFeedFriend && (
++                        <div className="friend-quick-row">
++                          {SNACKS.map((snack) => (
++                            <button
++                              key={snack.id}
++                              className="friend-quick-btn"
++                              title={snack.name}
++                              onClick={() => {
++                                setSnackFor(null);
++                                flashSent(friend.id, onFeedFriend(friend.id, snack), `${snack.emoji} gesendet`);
++                              }}
++                            >
++                              {snack.emoji}
++                            </button>
++                          ))}
++                        </div>
++                      )}
+                     </div>
+                     <div className="friend-actions">
+                       {friend.status === "pending_incoming" && (
+diff --git a/src/components/ImageCard.tsx b/src/components/ImageCard.tsx
+new file mode 100644
+index 0000000..09e8aa3
+--- /dev/null
++++ b/src/components/ImageCard.tsx
+@@ -0,0 +1,57 @@
++import { useEffect } from "react";
++
++export interface ReceivedImage {
++  id: string;
++  fromName: string;
++  src: string;
++  caption?: string;
++}
++
++interface ImageCardProps {
++  image: ReceivedImage;
++  x: number;
++  y: number;
++  queued: number;
++  onClose: () => void;
++}
++
++export const IMAGE_CARD_W = 280;
++export const IMAGE_CARD_H = 340;
++
++/** Where the card is drawn for a pet at (petX, petY) — shared with the click hit-zone. */
++export function imageCardCenter(petX: number, petY: number) {
++  const w = window.innerWidth;
++  const h = window.innerHeight;
++  const cx = Math.max(IMAGE_CARD_W / 2 + 10, Math.min(w - IMAGE_CARD_W / 2 - 10, petX));
++  let cy = petY - 60 - IMAGE_CARD_H / 2;
++  if (cy - IMAGE_CARD_H / 2 < 10) cy = petY + 60 + IMAGE_CARD_H / 2;
++  cy = Math.max(IMAGE_CARD_H / 2 + 10, Math.min(h - IMAGE_CARD_H / 2 - 10, cy));
++  return { x: cx, y: cy };
++}
++
++export default function ImageCard({ image, x, y, queued, onClose }: ImageCardProps) {
++  // Close automatically after 90 seconds
++  useEffect(() => {
++    const t = setTimeout(onClose, 90_000);
++    return () => clearTimeout(t);
++  }, [image.id, onClose]);
++
++  return (
++    <div
++      className="image-card"
++      style={{ left: x - IMAGE_CARD_W / 2, top: y - IMAGE_CARD_H / 2, width: IMAGE_CARD_W, height: IMAGE_CARD_H }}
++      onClick={onClose}
++      title="Klicken zum Schließen"
++    >
++      <div className="image-card-header">
++        <span>📬 von {image.fromName}</span>
++        <button className="image-card-close" onClick={onClose}>×</button>
++      </div>
++      <div className="image-card-body">
++        <img src={image.src} alt="" draggable={false} />
++      </div>
++      {image.caption && <div className="image-card-caption">{image.caption}</div>}
++      {queued > 0 && <div className="image-card-more">+{queued} weitere</div>}
++    </div>
++  );
++}
+diff --git a/src/components/VisitingPet.tsx b/src/components/VisitingPet.tsx
+index c7bf44f..57e5b3e 100644
+--- a/src/components/VisitingPet.tsx
++++ b/src/components/VisitingPet.tsx
+@@ -1,6 +1,7 @@
+ import { useState, useEffect, useRef } from "react";
+ import { getSpritePaths, Breed, Color } from "../hooks/useTheme";
+ import { IncomingVisit } from "../hooks/useFriends";
++import { SNACKS, Snack } from "./SnackPanel";
+ 
+ interface VisitingPetProps {
+   visit: IncomingVisit;
+@@ -8,13 +9,30 @@ interface VisitingPetProps {
+   userPetY: number;
+   onComplete: () => void;
+   onChat: (message: string) => void;
++  onFeed?: (snack: Snack) => void;
++  onPet?: () => void;
++  onSendImage?: (file?: File) => void;
+   onPositionChange?: (pos: { x: number; y: number } | null) => void;
+   onOverlayChange?: (open: boolean) => void;
+ }
+ 
+ type Phase = "enter" | "idle" | "exit" | "done";
+ 
+-export default function VisitingPet({ visit, userPetX, userPetY, onComplete, onChat, onPositionChange, onOverlayChange }: VisitingPetProps) {
++export default function VisitingPet({ visit, userPetX, userPetY, onComplete, onChat, onFeed, onPet, onSendImage, onPositionChange, onOverlayChange }: VisitingPetProps) {
++  const [snackPickerOpen, setSnackPickerOpen] = useState(false);
++  const [effect, setEffect] = useState<{ id: number; emojis: string[]; text?: string } | null>(null);
++  const [bouncing, setBouncing] = useState(false);
++  const effectTimerRef = useRef<ReturnType<typeof setTimeout>>();
++  const showEffect = (emojis: string[], text?: string) => {
++    if (effectTimerRef.current) clearTimeout(effectTimerRef.current);
++    setEffect({ id: Date.now(), emojis, text });
++    setBouncing(true);
++    effectTimerRef.current = setTimeout(() => {
++      setEffect(null);
++      setBouncing(false);
++    }, 2200);
++  };
++  useEffect(() => () => { if (effectTimerRef.current) clearTimeout(effectTimerRef.current); }, []);
+   const [phase, setPhase] = useState<Phase>("enter");
+   const [pos, setPos] = useState({ x: 0, y: 0 });
+   const [facingLeft, setFacingLeft] = useState(false);
+@@ -46,8 +64,8 @@ export default function VisitingPet({ visit, userPetX, userPetY, onComplete, onC
+ 
+   // Report overlay state (menu/chat open) to parent for cursor passthrough
+   useEffect(() => {
+-    onOverlayChangeRef.current?.(menuOpen || chatOpen);
+-  }, [menuOpen, chatOpen]);
++    onOverlayChangeRef.current?.(menuOpen || chatOpen || snackPickerOpen);
++  }, [menuOpen, chatOpen, snackPickerOpen]);
+ 
+   const paths = getSpritePaths(visit.breed as Breed, visit.color as Color);
+ 
+@@ -96,30 +114,24 @@ export default function VisitingPet({ visit, userPetX, userPetY, onComplete, onC
+   const phaseRef = useRef(phase);
+   phaseRef.current = phase;
+ 
++  const [shownMessageId, setShownMessageId] = useState<string | null>(null);
+   useEffect(() => {
+     const enterTimer = setTimeout(() => {
+-      if (phaseRef.current === "enter") {
+-        setPhase("idle");
+-        if (visit.message) {
+-          setShowMessage(true);
+-          setTimeout(() => setShowMessage(false), 8000);
+-        }
+-      }
++      if (phaseRef.current === "enter") setPhase("idle");
+     }, 5000);
+     return () => clearTimeout(enterTimer);
+   }, []);
+ 
+-  // Show message bubble when message changes during idle (chat replies)
+-  const prevMessageRef = useRef(visit.message);
++  // Show a message bubble for every new message — also ones that arrived while walking in
+   useEffect(() => {
+-    if (visit.message && visit.message !== prevMessageRef.current && phaseRef.current === "idle") {
+-      setShowMessage(true);
+-      const timer = setTimeout(() => setShowMessage(false), 8000);
+-      prevMessageRef.current = visit.message;
+-      return () => clearTimeout(timer);
+-    }
+-    prevMessageRef.current = visit.message;
+-  }, [visit.message]);
++    if (phase !== "idle" || !visit.message || shownMessageId === visit.messageId) return;
++    setShownMessageId(visit.messageId);
++    setShowMessage(true);
++    const duration = Math.min(20000, Math.max(8000, visit.message.length * 120));
++    const timer = setTimeout(() => setShowMessage(false), duration);
++    return () => clearTimeout(timer);
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [phase, visit.messageId, visit.message]);
+ 
+   // When exit animation reaches the edge, finish
+   const handleExitComplete = () => {
+@@ -135,6 +147,7 @@ export default function VisitingPet({ visit, userPetX, userPetY, onComplete, onC
+   const sendHome = () => {
+     setMenuOpen(false);
+     setChatOpen(false);
++    setSnackPickerOpen(false);
+     if (phaseRef.current === "idle") {
+       setPhase("exit");
+     }
+@@ -143,7 +156,7 @@ export default function VisitingPet({ visit, userPetX, userPetY, onComplete, onC
+   // Handle sprite click → open menu
+   const handleSpriteClick = () => {
+     if (phaseRef.current !== "idle") return;
+-    if (chatOpen) return;
++    if (chatOpen || snackPickerOpen) return;
+     setMenuOpen((prev) => !prev);
+   };
+ 
+@@ -248,17 +261,83 @@ export default function VisitingPet({ visit, userPetX, userPetY, onComplete, onC
+                 setChatOpen(true);
+               }}
+             >
+-              💬 Chat
++              💬 Nachricht
+             </button>
++            {onFeed && (
++              <button
++                className="visitor-menu-btn"
++                onClick={() => {
++                  setMenuOpen(false);
++                  setSnackPickerOpen(true);
++                }}
++              >
++                🍣 Füttern
++              </button>
++            )}
++            {onPet && (
++              <button
++                className="visitor-menu-btn"
++                onClick={() => {
++                  setMenuOpen(false);
++                  onPet();
++                  showEffect(["❤️", "💕", "💖"], "*schnurr*");
++                }}
++              >
++                ❤️ Streicheln
++              </button>
++            )}
++            {onSendImage && (
++              <button
++                className="visitor-menu-btn"
++                onClick={() => {
++                  setMenuOpen(false);
++                  onSendImage();
++                }}
++              >
++                🖼️ Bild / Meme
++              </button>
++            )}
+             <button
+               className="visitor-menu-btn"
+               onClick={sendHome}
+             >
+-              👋 Send Home
++              👋 Nach Hause schicken
+             </button>
+           </div>
+         )}
+ 
++        {/* Snack picker for feeding the visitor */}
++        {snackPickerOpen && (
++          <>
++            <div className="visitor-menu-backdrop" onClick={() => setSnackPickerOpen(false)} />
++            <div className="visitor-snack-picker">
++              {SNACKS.map((snack) => (
++                <button
++                  key={snack.id}
++                  className="visitor-snack-btn"
++                  title={snack.name}
++                  onClick={() => {
++                    setSnackPickerOpen(false);
++                    onFeed?.(snack);
++                    showEffect([snack.emoji, "✨", "💛"], "nom nom!");
++                  }}
++                >
++                  {snack.emoji}
++                </button>
++              ))}
++            </div>
++          </>
++        )}
++
++        {effect && (
++          <div className="visitor-effect" key={effect.id}>
++            {effect.emojis.map((e, i) => (
++              <span key={i} className="visitor-effect-emoji" style={{ animationDelay: `${i * 0.15}s`, left: `${10 + i * 18}px` }}>{e}</span>
++            ))}
++            {effect.text && <span className="visitor-effect-text">{effect.text}</span>}
++          </div>
++        )}
++
+         {/* Chat input */}
+         {chatOpen && (
+           <div className="visitor-chat-container">
+@@ -269,14 +348,24 @@ export default function VisitingPet({ visit, userPetX, userPetY, onComplete, onC
+               value={chatText}
+               onChange={(e) => setChatText(e.target.value)}
+               onKeyDown={handleChatKeyDown}
+-              placeholder="Say something..."
+-              maxLength={100}
++              onPaste={(e) => {
++                const item = Array.from(e.clipboardData.items).find((i) => i.type.startsWith("image/"));
++                const file = item?.getAsFile();
++                if (file && onSendImage) {
++                  e.preventDefault();
++                  setChatOpen(false);
++                  setChatText("");
++                  onSendImage(file);
++                }
++              }}
++              placeholder="Nachricht oder Bild einfügen (Strg+V)..."
++              maxLength={300}
+             />
+           </div>
+         )}
+ 
+         <div
+-          className={`visiting-pet-sprite ${spriteClass} ${facingLeft ? "flip" : ""}`}
++          className={`visiting-pet-sprite ${spriteClass} ${facingLeft ? "flip" : ""} ${bouncing ? "happy" : ""}`}
+           style={{
+             backgroundImage: `url(${phase === "idle" ? paths.idle : paths.walk})`,
+             pointerEvents: phase === "idle" ? "auto" : "none",
+diff --git a/src/hooks/useDialogue.ts b/src/hooks/useDialogue.ts
+index 99a0d9e..626916d 100644
+--- a/src/hooks/useDialogue.ts
++++ b/src/hooks/useDialogue.ts
+@@ -21,6 +21,7 @@ interface DialogueState {
+   muted: boolean;
+   generate: (mode: string, trigger: string, userInput?: string) => void;
+   dismiss: () => void;
++  say: (message: string, duration?: number) => void;
+ }
+ 
+ export function useDialogue(
+@@ -137,5 +138,5 @@ export function useDialogue(
+     }
+   }, [appChanged, appName, visible, muted, generate]);
+ 
+-  return { text, visible, hiding, loading, muted, generate, dismiss };
++  return { text, visible, hiding, loading, muted, generate, dismiss, say: showDialogue };
+ }
+diff --git a/src/hooks/useFriends.ts b/src/hooks/useFriends.ts
+index 2a06ea6..510d2a6 100644
+--- a/src/hooks/useFriends.ts
++++ b/src/hooks/useFriends.ts
+@@ -1,5 +1,6 @@
+ import { useState, useEffect, useCallback, useRef } from "react";
+ import { supabase, generatePetCode, PetRow, VisitRow } from "../lib/supabase";
++import { decodeAction, encodeAction, PetAction } from "../lib/actions";
+ 
+ export type FriendStatus = "mutual" | "pending_outgoing" | "pending_incoming";
+ 
+@@ -20,9 +21,21 @@ export interface IncomingVisit {
+   breed: string;
+   color: string;
+   message: string;
++  messageId: string;
+ }
+ 
+-export function useFriends(breed: string, color: string) {
++export interface IncomingInteraction {
++  id: string;
++  fromPetId: string;
++  fromName: string;
++  action: PetAction;
++}
++
++export function useFriends(
++  breed: string,
++  color: string,
++  onInteraction?: (interaction: IncomingInteraction) => void,
++) {
+   const [myPetId, setMyPetId] = useState<string | null>(() => localStorage.getItem("pet-id"));
+   const [myPetCode, setMyPetCode] = useState<string | null>(() => localStorage.getItem("pet-code"));
+   const [myPetName, setMyPetNameState] = useState<string>(() => localStorage.getItem("pet-name") || "Cat");
+@@ -45,6 +58,8 @@ export function useFriends(breed: string, color: string) {
+   friendsRef.current = friends;
+   const currentVisitRef = useRef(currentVisit);
+   currentVisitRef.current = currentVisit;
++  const onInteractionRef = useRef(onInteraction);
++  onInteractionRef.current = onInteraction;
+ 
+   // Check Supabase connection
+   useEffect(() => {
+@@ -103,7 +118,7 @@ export function useFriends(breed: string, color: string) {
+     };
+ 
+     heartbeat();
+-    const interval = setInterval(heartbeat, 60_000);
++    const interval = setInterval(heartbeat, 30_000);
+ 
+     const handleUnload = () => {
+       // Use sendBeacon for reliable offline signal
+@@ -192,7 +207,7 @@ export function useFriends(breed: string, color: string) {
+   useEffect(() => {
+     if (!myPetId) return;
+     refreshFriends();
+-    const interval = setInterval(refreshFriends, 60_000);
++    const interval = setInterval(refreshFriends, 30_000);
+     return () => clearInterval(interval);
+   }, [myPetId, refreshFriends]);
+ 
+@@ -268,6 +283,21 @@ export function useFriends(breed: string, color: string) {
+     });
+   }, []);
+ 
++  // Send an interaction (feed, pet, image) to a friend's pet
++  const sendAction = useCallback(async (toFriendId: string, action: PetAction): Promise<boolean> => {
++    if (!myPetIdRef.current) return false;
++    const { error } = await supabase.from("visits").insert({
++      from_pet_id: myPetIdRef.current,
++      to_pet_id: toFriendId,
++      message: encodeAction(action),
++      breed: breedRef.current,
++      color: colorRef.current,
++      name: myPetNameRef.current,
++    });
++    if (error) console.error("Failed to send action:", error);
++    return !error;
++  }, []);
++
+   // Start a hangout: send both cats to visit each other
+   const startHangout = useCallback(async (friendId: string) => {
+     if (!myPetIdRef.current) return;
+@@ -300,54 +330,87 @@ export function useFriends(breed: string, color: string) {
+     setCurrentVisit(null);
+   }, []);
+ 
+-  // Receive visits via realtime subscription + periodic polling fallback
++  // Receive visits: realtime only nudges, the database query is the source of truth.
++  // All unconsumed rows are processed oldest-first, so nothing gets lost or reordered.
+   useEffect(() => {
+     if (!myPetId) return;
+ 
+-    const consumeVisit = async (visit: VisitRow) => {
+-      const current = currentVisitRef.current;
++    const handled = new Set<string>();
++    let running = false;
++    let rerun = false;
++    let stopped = false;
+ 
++    const handleVisit = (visit: VisitRow) => {
++      const action = decodeAction(visit.message);
++      if (action) {
++        onInteractionRef.current?.({
++          id: visit.id,
++          fromPetId: visit.from_pet_id,
++          fromName: visit.name,
++          action,
++        });
++        return;
++      }
++
++      const current = currentVisitRef.current;
+       if (current && current.fromPetId === visit.from_pet_id) {
+         // Same pet is already visiting — show their message as a chat bubble
+         if (visit.message) {
+-          setCurrentVisit({ ...current, message: visit.message });
++          const next = { ...current, message: visit.message, messageId: visit.id };
++          currentVisitRef.current = next;
++          setCurrentVisit(next);
+         }
+-      } else if (!current) {
+-        // No current visit — show the new visitor
+-        setCurrentVisit({
++      } else if (!current || visit.message) {
++        // Nobody visiting, or a chat message from another friend: that friend's pet comes over
++        const next = {
+           id: visit.id,
+           fromPetId: visit.from_pet_id,
+           fromName: visit.name,
+           breed: visit.breed,
+           color: visit.color,
+           message: visit.message,
+-        });
++          messageId: visit.id,
++        };
++        currentVisitRef.current = next;
++        setCurrentVisit(next);
+       }
+-      // else: different pet while one is already visiting — consume silently
+-
+-      // Always mark consumed so it doesn't re-appear
+-      await supabase.from("visits").update({ consumed: true }).eq("id", visit.id);
+     };
+ 
+-    // Poll for unconsumed visits (runs on mount + every 5s as reliability fallback)
+     const checkUnconsumed = async () => {
+-      const { data } = await supabase
+-        .from("visits")
+-        .select("*")
+-        .eq("to_pet_id", myPetId)
+-        .eq("consumed", false)
+-        .order("created_at", { ascending: false })
+-        .limit(1);
+-
+-      if (data && data.length > 0) {
+-        await consumeVisit(data[0] as VisitRow);
++      if (stopped) return;
++      if (running) {
++        rerun = true;
++        return;
++      }
++      running = true;
++      try {
++        do {
++          rerun = false;
++          const { data, error } = await supabase
++            .from("visits")
++            .select("*")
++            .eq("to_pet_id", myPetId)
++            .eq("consumed", false)
++            .order("created_at", { ascending: true })
++            .limit(20);
++          if (error) throw error;
++          const rows = ((data || []) as VisitRow[]).filter((v) => !handled.has(v.id));
++          if (rows.length === 0) continue;
++
++          rows.forEach((v) => handled.add(v.id));
++          await supabase.from("visits").update({ consumed: true }).in("id", rows.map((v) => v.id));
++          rows.forEach(handleVisit);
++        } while (rerun && !stopped);
++      } catch (err) {
++        console.error("Failed to check visits:", err);
++      } finally {
++        running = false;
+       }
+     };
+ 
+     checkUnconsumed();
+-    const pollInterval = setInterval(checkUnconsumed, 5000);
++    const pollInterval = setInterval(checkUnconsumed, 3000);
+ 
+-    // Subscribe to new visits via realtime
+     const channel = supabase
+       .channel(`visits-${myPetId}`)
+       .on(
+@@ -358,16 +421,20 @@ export function useFriends(breed: string, color: string) {
+           table: "visits",
+           filter: `to_pet_id=eq.${myPetId}`,
+         },
+-        async (payload) => {
+-          const visit = payload.new as VisitRow;
+-          if (visit.consumed) return;
+-          await consumeVisit(visit);
+-        }
++        () => { checkUnconsumed(); }
+       )
+       .subscribe();
+ 
++    // Catch up immediately when the window/app becomes active again
++    const onWake = () => checkUnconsumed();
++    window.addEventListener("focus", onWake);
++    document.addEventListener("visibilitychange", onWake);
++
+     return () => {
++      stopped = true;
+       clearInterval(pollInterval);
++      window.removeEventListener("focus", onWake);
++      document.removeEventListener("visibilitychange", onWake);
+       supabase.removeChannel(channel);
+     };
+   }, [myPetId]);
+@@ -386,6 +453,7 @@ export function useFriends(breed: string, color: string) {
+     acceptFriend,
+     removeFriend,
+     sendVisit,
++    sendAction,
+     startHangout,
+     setMyPetName,
+     currentVisit,
+diff --git a/src/hooks/useHunger.ts b/src/hooks/useHunger.ts
+index afcec50..b76c315 100644
+--- a/src/hooks/useHunger.ts
++++ b/src/hooks/useHunger.ts
+@@ -1,7 +1,7 @@
+ import { useState, useEffect, useCallback, useRef } from "react";
+ 
+ const STORAGE_KEY = "pet-hunger";
+-const DECAY_PER_MS = 100 / (30 * 60 * 1000); // full-to-empty in 30 min
++const DECAY_PER_MS = 100 / (8 * 60 * 60 * 1000); // full-to-empty in 8 hours
+ const TICK_MS = 1000;
+ 
+ export type HungerLevel = "full" | "peckish" | "hungry" | "starving";
+diff --git a/src/lib/actions.ts b/src/lib/actions.ts
+new file mode 100644
+index 0000000..779354b
+--- /dev/null
++++ b/src/lib/actions.ts
+@@ -0,0 +1,72 @@
++// Interactions between friends are sent through the existing `visits.message`
++// column. Plain text = chat message; text starting with ACTION_PREFIX = JSON action.
++
++export const ACTION_PREFIX = "\u0001PET:";
++
++export type PetAction =
++  | { t: "feed"; snack: string }
++  | { t: "pet" }
++  | { t: "img"; src: string; caption?: string };
++
++export function encodeAction(action: PetAction): string {
++  return ACTION_PREFIX + JSON.stringify(action);
++}
++
++export function decodeAction(message: string): PetAction | null {
++  if (!message || !message.startsWith(ACTION_PREFIX)) return null;
++  try {
++    const a = JSON.parse(message.slice(ACTION_PREFIX.length));
++    if (a && (a.t === "feed" || a.t === "pet" || a.t === "img")) return a as PetAction;
++  } catch {
++    /* ignore malformed */
++  }
++  return null;
++}
++
++const MAX_SIDE = 520;
++const MAX_GIF_BYTES = 450 * 1024;
++
++function readAsDataUrl(file: Blob): Promise<string> {
++  return new Promise((resolve, reject) => {
++    const r = new FileReader();
++    r.onload = () => resolve(r.result as string);
++    r.onerror = () => reject(r.error);
++    r.readAsDataURL(file);
++  });
++}
++
++/** Shrinks an image so it fits comfortably into a database row. */
++export async function imageFileToDataUrl(file: Blob): Promise<string> {
++  // Small GIFs stay animated
++  if (file.type === "image/gif" && file.size <= MAX_GIF_BYTES) {
++    return readAsDataUrl(file);
++  }
++  const url = await readAsDataUrl(file);
++  const img = new Image();
++  await new Promise<void>((resolve, reject) => {
++    img.onload = () => resolve();
++    img.onerror = () => reject(new Error("Bild konnte nicht gelesen werden"));
++    img.src = url;
++  });
++  const scale = Math.min(1, MAX_SIDE / Math.max(img.width, img.height));
++  const canvas = document.createElement("canvas");
++  canvas.width = Math.max(1, Math.round(img.width * scale));
++  canvas.height = Math.max(1, Math.round(img.height * scale));
++  const ctx = canvas.getContext("2d");
++  if (!ctx) return url;
++  ctx.fillStyle = "#fff";
++  ctx.fillRect(0, 0, canvas.width, canvas.height);
++  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
++  return canvas.toDataURL("image/jpeg", 0.78);
++}
++
++/** Opens the system file picker and returns the chosen image (or null). */
++export function pickImageFile(): Promise<File | null> {
++  return new Promise((resolve) => {
++    const input = document.createElement("input");
++    input.type = "file";
++    input.accept = "image/*";
++    input.onchange = () => resolve(input.files?.[0] ?? null);
++    input.click();
++  });
++}
+diff --git a/src/styles/friends.css b/src/styles/friends.css
+index ea0474b..e53bc5d 100644
+--- a/src/styles/friends.css
++++ b/src/styles/friends.css
+@@ -524,3 +524,208 @@
+   from { opacity: 0; transform: translateX(-50%) translateY(4px); }
+   to { opacity: 1; transform: translateX(-50%) translateY(0); }
+ }
++
++/* Visitor: snack picker, effects, wrapped messages */
++.visiting-pet-message {
++  white-space: normal !important;
++  width: max-content;
++  max-width: 220px !important;
++  text-overflow: clip !important;
++  overflow-wrap: anywhere;
++  font-size: 11px !important;
++  line-height: 1.3;
++  top: 84px;
++  bottom: auto !important;
++}
++
++.visitor-snack-picker {
++  position: absolute;
++  bottom: 68px;
++  left: 50%;
++  transform: translateX(-50%);
++  display: flex;
++  gap: 4px;
++  background: white;
++  border: 2px solid #ddd;
++  border-radius: 12px;
++  padding: 6px;
++  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
++  z-index: 1000;
++  pointer-events: auto;
++}
++
++.visitor-snack-btn {
++  width: 32px;
++  height: 32px;
++  border: none;
++  border-radius: 8px;
++  background: transparent;
++  font-size: 20px;
++  cursor: pointer;
++  transition: transform 0.15s ease, background 0.15s ease;
++}
++
++.visitor-snack-btn:hover {
++  background: #fff8f0;
++  transform: scale(1.2);
++}
++
++.visitor-effect {
++  position: absolute;
++  left: 0;
++  top: -10px;
++  width: 64px;
++  height: 0;
++  pointer-events: none;
++}
++
++.visitor-effect-emoji {
++  position: absolute;
++  top: 0;
++  font-size: 18px;
++  opacity: 0;
++  animation: visitor-float-up 1.6s ease-out forwards;
++}
++
++.visitor-effect-text {
++  position: absolute;
++  top: -34px;
++  left: 50%;
++  transform: translateX(-50%);
++  background: white;
++  color: #e8a33c;
++  font-family: 'Comic Sans MS', 'Chalkboard SE', cursive;
++  font-size: 11px;
++  font-weight: 700;
++  padding: 2px 8px;
++  border-radius: 8px;
++  white-space: nowrap;
++  animation: message-fade-in 0.3s ease-out;
++}
++
++.visiting-pet-sprite.happy {
++  animation: sprite-idle 1.2s steps(8) infinite, visitor-happy-bounce 0.5s ease-in-out 3;
++}
++
++@keyframes visitor-float-up {
++  0% { opacity: 0; transform: translateY(0) scale(0.6); }
++  20% { opacity: 1; }
++  100% { opacity: 0; transform: translateY(-50px) scale(1.2); }
++}
++
++@keyframes visitor-happy-bounce {
++  0%, 100% { translate: 0 0; }
++  50% { translate: 0 -10px; }
++}
++
++/* Received image / meme card */
++.image-card {
++  position: absolute;
++  z-index: 1001;
++  pointer-events: auto;
++  background: white;
++  border: 2px solid #e8a33c;
++  border-radius: 14px;
++  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.25);
++  display: flex;
++  flex-direction: column;
++  overflow: hidden;
++  cursor: pointer;
++  animation: message-fade-in 0.3s ease-out;
++  font-family: 'Comic Sans MS', 'Chalkboard SE', cursive;
++}
++
++.image-card-header {
++  display: flex;
++  justify-content: space-between;
++  align-items: center;
++  padding: 6px 10px;
++  font-size: 12px;
++  font-weight: 700;
++  color: #333;
++  background: #fff8f0;
++}
++
++.image-card-close {
++  border: none;
++  background: transparent;
++  font-size: 18px;
++  line-height: 1;
++  cursor: pointer;
++  color: #999;
++}
++
++.image-card-body {
++  flex: 1;
++  min-height: 0;
++  display: flex;
++  align-items: center;
++  justify-content: center;
++  background: #f6f6f6;
++}
++
++.image-card-body img {
++  max-width: 100%;
++  max-height: 100%;
++  object-fit: contain;
++}
++
++.image-card-caption {
++  padding: 6px 10px;
++  font-size: 12px;
++  color: #333;
++  overflow-wrap: anywhere;
++}
++
++.image-card-more {
++  position: absolute;
++  bottom: 6px;
++  right: 8px;
++  font-size: 10px;
++  color: #999;
++}
++
++/* Floating hearts / food over own pet */
++.pet-effect {
++  position: absolute;
++  z-index: 1000;
++  pointer-events: none;
++}
++
++.pet-effect span {
++  position: absolute;
++  font-size: 22px;
++  opacity: 0;
++  animation: visitor-float-up 1.8s ease-out forwards;
++}
++
++/* Friend quick actions in friends panel */
++.friend-quick-row {
++  display: flex;
++  gap: 4px;
++  padding: 4px 0 2px 0;
++  flex-wrap: wrap;
++}
++
++.friend-quick-btn {
++  border: 1px solid #eee;
++  background: #fff;
++  border-radius: 8px;
++  font-size: 15px;
++  width: 30px;
++  height: 28px;
++  cursor: pointer;
++  transition: transform 0.15s ease, background 0.15s ease;
++}
++
++.friend-quick-btn:hover {
++  background: #fff8f0;
++  transform: scale(1.1);
++}
++
++.friend-quick-status {
++  font-size: 10px;
++  color: #4caf50;
++  align-self: center;
++  margin-left: 4px;
++}

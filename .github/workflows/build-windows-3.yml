@@ -1,0 +1,44 @@
+name: Windows-Build-3
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Zeilenenden nicht umwandeln
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v4
+
+      - name: Aenderungen einspielen
+        shell: bash
+        run: |
+          for p in $(ls .github/workflows/*.patch | sort); do
+            echo "Wende $p an"
+            git apply --whitespace=nowarn "$p"
+          done
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Abhaengigkeiten installieren
+        run: npm ci
+
+      - name: Icons neu erzeugen
+        run: npx tauri icon src-tauri/icons/icon.png
+
+      - name: App bauen
+        env:
+          VITE_SUPABASE_URL: https://vxosuqjdkjmpvyouzfsk.supabase.co
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+        run: npx tauri build --bundles nsis
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Desktop-Pet-Windows-Installer
+          path: src-tauri/target/release/bundle/nsis/*.exe
